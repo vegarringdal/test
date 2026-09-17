@@ -1,0 +1,5291 @@
+/*!
+ * TreDeSpace Web Viewer v0.0.126
+ * Copyright (c) 2026 Vegar Ringdal. All rights reserved.
+ *
+ * Use of the hosted application is permitted as-is. Redistribution of this
+ * code or a reconstructed form of it, publication of the model format or
+ * derived tools to compete with the application, and use of this code or its
+ * data for machine-learning training or text and data mining are not
+ * permitted. Rights under mandatory law (incl. decompilation for
+ * interoperability) are unaffected. See https://tredespace.com — LICENSE.
+ */
+import"./modulepreload-polyfill-P2Xu9kJm.js";import"./theme-D8s3F96L.js";var e=`// tredespace-client.ts — typed postMessage client for the TreDeSpace viewer.
+//
+// SPDX-License-Identifier: MIT
+//
+// Copyright (c) 2026 Vegar Ringdal
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+// COPY THIS FILE into your host application (it is dependency-free and
+// self-contained). It implements the protocol described in EVENTS.md of the
+// viewer repository, protocol version 1. Keep the two in sync when updating.
+//
+// STRICT (enforced by the build): every command method needs a JSDoc comment
+// AND a matching \`### command\` section with a fenced payload/response example in
+// EVENTS.md — the /docs/ reference is generated from both. \`vite build\` fails if
+// either is missing. See CLAUDE.md → "postMessage API".
+//
+// Commands NEVER throw — they resolve a Result<T> = { data?, error? }; check
+// \`error\` (Rust-style). Only ready()/on*()/dispose() sit outside that.
+//
+// GETTING ACCESS (the viewer ignores messages from unknown origins):
+//   The easiest bootstrap is the embed URL — your page controls it, and the
+//   viewer honors ?apiOrigins= by default:
+//     <iframe src="https://viewer.example.com/?apiOrigins=https://your-portal.example.com">
+//   Alternatives: same-origin hosting needs nothing; or an admin lists your
+//   origin under the viewer's Settings → External → API security (required if
+//   a deployment turned the URL-parameter route off there).
+//
+// Usage — your page EMBEDS the viewer in an iframe:
+//   const client = new TredespaceClient(iframe, { targetOrigin: 'https://viewer.example.com' });
+//   await client.ready();                          // resolves on app.ready
+//   const res = await client.selectionSet(['/TP400-PIPE-01']);
+//   if (res.error) console.warn(res.error.msg);
+//   else console.log(res.data.matched, res.data.missed);
+//   client.dispose();
+// Usage — your page runs INSIDE the viewer (External-app panel/dialog): same,
+// but drive the parent window, with the VIEWER's origin as targetOrigin
+// (derivable from document.referrer; never '*' — it is also the filter for
+// which incoming messages this client trusts):
+//   const viewerOrigin = new URL(document.referrer).origin;
+//   const client = new TredespaceClient(window.parent, { targetOrigin: viewerOrigin });
+//
+// TALKING BETWEEN YOUR OWN FRAMES (browser storage partitioning):
+//   When your page embeds the viewer and the viewer embeds a page of YOURS
+//   back (an External-app panel or modal dialog), those two same-origin pages
+//   of yours sit in DIFFERENT storage partitions: the nested one has a
+//   cross-site ancestor (the viewer), so BroadcastChannel — and localStorage /
+//   IndexedDB — do NOT reach between them. Measured, Chrome 151:
+//     A → A                      (no viewer in between)     works
+//     A → viewer(B) → A                                     nothing arrives
+//     A → viewer(B) → A   (any iframe sandbox attribute)    nothing arrives
+//     A | A side by side inside viewer(B)  (two dialogs)    works
+//   It is not a sandbox or a permission the viewer controls — the one switch
+//   that lifts it is Chrome's browser-wide
+//   \`--disable-features=ThirdPartyStoragePartitioning\`, a global privacy
+//   setting and never something to build a product on. Use instead:
+//     - between two of YOUR pages inside the viewer: BroadcastChannel works
+//       (same partition) — no relay needed.
+//     - give the app \`sandbox: ['storage-access']\` and the nested page may ask
+//       the browser for its unpartitioned cookies/storage itself
+//       (document.requestStorageAccess(), a browser prompt) — test your SSO
+//       flow on it; it is the browser's answer, not the viewer's.
+//     - nested page ↔ your top page: postMessage directly (the nested page's
+//       window.parent.parent is your top page; validate event.origin), or
+//       relay through the viewer with instanceSet / onInstanceChanged — one
+//       shared JSON blob per viewer window, broadcast to every embedded frame.
+//     - serving the viewer from your own site (a path or a subdomain — a
+//       subdomain is same-SITE) removes the cross-site ancestor entirely, and
+//       all of the above just works.
+//
+// A TAB THE VIEWER OPENED (External app with newWindow): its window.opener
+//   IS the viewer — drive it directly, like a panel drives window.parent:
+//     const viewerOrigin = new URL(document.referrer).origin;
+//     const client = new TredespaceClient(window.opener, { targetOrigin: viewerOrigin });
+//     await client.ready();          // the viewer answers the client's hello
+//   Events reach it too. It is a top-level page: first-party storage, no
+//   partitioning. Reloading the viewer drops its handle on such tabs — reload
+//   the tab to reconnect.
+//
+// WINDOWS YOU OPEN (relay):
+//   A tab or popup opened by your host page — or by a page of YOURS inside
+//   the viewer (give that app the 'popups' sandbox option) — holds no handle
+//   on the viewer, and is storage-partitioned away from an embedded page
+//   anyway. Let the opener RELAY: the new window
+//   drives its opener with an unchanged client, the opener forwards to the
+//   viewer.
+//     // in the new window
+//     const client = new TredespaceClient(window.opener, { targetOrigin: openerOrigin });
+//     await client.ready();                       // answered by the relay
+//     // in the opener (your top page, or a panel/dialog inside the viewer)
+//     const win = window.open('https://your-portal.example.com/tool.html');
+//     const off = client.relay(win, { origin: 'https://your-portal.example.com' });
+//   Commands, responses, progress ticks, events and app.ready all pass
+//   through. ArrayBuffer bytes are re-transferred (zero-copy); everything
+//   else is structured-cloned once more per hop (~50 ms per 100k sqlExecute
+//   rows — sqlSelect/sqlColor move no rows and cost nothing extra). A relayed
+//   window's client can relay again to windows IT opens. The window gets
+//   exactly the opener's API rights, so \`origin\` is mandatory and never '*'.
+//   Lifecycle: onRelayChanged on the opener (connected / disconnected /
+//   closed per window), onClosed on ANY client (its link ended: reason
+//   'disposed' | 'relay' | 'target'); ending a relay closes the window's
+//   client, and a closed window drops its relay by itself.
+//
+// HOSTING — proxy the viewer under your own site (recommended):
+//   Framing tredespace.com directly makes the viewer a cross-site frame, so
+//   the panels/dialogs of YOURS that open inside it are third-party: storage
+//   partitioned, cookies/SSO not reaching them, BroadcastChannel silent. Put
+//   the viewer behind your reverse proxy (a path or a subdomain) and embed
+//   THAT — same-site, no ?apiOrigins= needed, your embedded panels keep their
+//   session. nginx: \`location /tredespace/ { proxy_pass https://tredespace.com/;
+//   proxy_set_header Host tredespace.com; proxy_ssl_server_name on;
+//   proxy_ssl_name tredespace.com; }\` (full snippet in EVENTS.md → Hosting).
+//   On an INTERNAL network this is not optional: tredespace.com is public, so
+//   framed directly your internal panels would open inside a public-origin
+//   frame (frame-ancestors refuses it, SSO cookies never arrive) and every
+//   client needs internet access; proxied, the viewer is an internal URL and
+//   only your server fetches tredespace.com.
+//   In DEV the same bites: a host on http://localhost framing the public
+//   viewer, which then opens your localhost panels = public → local request,
+//   blocked by Chrome/Edge (Private Network Access). Proxy in dev too (Vite
+//   server.proxy '/tredespace' → https://tredespace.com, changeOrigin) or, on
+//   your own machine only, disable the "private network" block in
+//   chrome://flags / edge://flags.
+//   A proxy always serves the CURRENT release; to lock a version, host your
+//   own container of a chosen build or fork the project.
+//
+// EVENTS (unsolicited app → host; subscribe with on() or the typed helpers).
+//   Every subscription returns its UNSUBSCRIBE function, and also takes
+//   { signal } like addEventListener. The subscription signal and the client's
+//   own constructor { signal } are INDEPENDENT: a global, app-lifetime client
+//   takes no signal (so no component can dispose it by accident), and each
+//   component owns just its subscriptions with its own AbortController. Keep
+//   the handler in a ref so a closure over changing state doesn't
+//   re-subscribe every render:
+//     export const client = new TredespaceClient(iframe, { targetOrigin }); // global
+//     …
+//     const latest = useRef(handler); latest.current = handler;
+//     useEffect(() => {
+//       const ac = new AbortController();
+//       client.onTreeSelect((e) => latest.current(e), { signal: ac.signal });
+//       client.onThemeChanged((e) => setTheme(e.theme), { signal: ac.signal });
+//       return () => ac.abort();   // ends these subscriptions; the client lives on
+//     }, []);
+//   Pass { signal } to the CONSTRUCTOR only when the client should die with a
+//   scope (a modal that embeds its own viewer): abort() then disposes it too.
+//   dispose() drops the message listener wholesale — nothing fires after it.
+//   'tree.select'                — user selected a tree row / clicked the model
+//   'instance.changed'           — the shared instance-data blob changed
+//   'viewpoints.bookmark'        — user clicked the host bookmark button
+//                                  (onViewpointsBookmark; config attached)
+//   'theme.changed'              — viewer theme switched, from any route
+//                                  (onThemeChanged) — restyle your frames
+//   'dialog.changed'             — an external dialog or panel opened / was
+//                                  hidden / shown / renamed / is closing /
+//                                  closed (onDialogChanged; onDialogClosing
+//                                  gives YOUR page a last word before unmount)
+//   'assets.importUrl:progress'  — per-file import progress (assetsImportUrl
+//                                  surfaces it via its onProgress option)
+//   'assets.load:progress'       — per-model load progress (assetsLoad /
+//                                  assetsSetLoaded, same onProgress option)
+//   'sql.importUrl:progress'     — per-file + per-chunk SQL import progress
+//                                  (sqlImport / sqlImportUrl onProgress)
+//   'sql.execute:progress'       — per-statement + per-N-rows batch progress
+//                                  (sqlExecute onProgress)
+//   'sql.color:progress'         — rows collected so far while a colouring
+//   'sql.select:progress'          query runs (sqlColor / sqlSelect
+//                                  onProgress)
+//   LOCAL (raised by the client itself, never posted):
+//   'client.closed'              — this client's link ended (onClosed;
+//                                  reason 'disposed' | 'relay' | 'target')
+//   'relay.changed'              — a window this client relays for connected /
+//                                  disconnected / closed (onRelayChanged)
+//
+// COMMON FLOWS (each step is one method below — see its JSDoc):
+//   Sync hosted models:   assetsList → compare each asset's md5 against a hash
+//     of your hosted file → assetsImportUrl the changed/missing (replace:true),
+//     assetsRemove the stale → assetsSetLoaded(desiredIds) applies the exact
+//     visible set (idempotent; unlisted models are unloaded).
+//   Colour from data:     sqlColor / sqlSelect run the query INSIDE the viewer
+//     and hand the packed fullnames straight to the model DB — nothing but a
+//     row count comes back, so million-row results are one message. For a list
+//     your own backend produced, encodeNameList() + colorRulesApplyList /
+//     selectionSetList take the same packed path.
+//   Sync hosted SQL dbs:  sqlList (md5 = hash of the bytes you delivered) →
+//     sqlImportUrl only what changed (GB-safe: streamed straight into OPFS).
+//     Or per query: sqlCheck(sql) pre-flights which dbs the script references
+//     and whether they're present/current — then sqlQuery.
+//   Viewpoint bookmarks:  viewpointsSetBookmarkButton({label}) → user clicks →
+//     onViewpointsBookmark fires with the config blob → persist it; restore
+//     later with viewpointsSet(config) or a hosted file via viewpointsSetUrl
+//     (showViewer:true docks the presentation panel).
+//   Context-dependent UI: externalAppsSet([...]) after ready() installs
+//     SESSION-ONLY entries in the viewer's External ribbon (never persisted —
+//     re-set them after every app.ready).
+
+// ── protocol types ───────────────────────────────────────────────────────────
+
+export const TREDESPACE_PROTOCOL = 1;
+
+/** Failure codes: the eight protocol codes the viewer can return, plus two
+ *  host-side ones — a request that timed out, or a dead transport (disposed
+ *  client / no viewer window). \`unknown-command\` means this viewer version
+ *  has no such command — feature-detect with {@link TredespaceClient.supports}.
+ *  \`busy\` means the command never ran (the import lock was held) so a retry is
+ *  sensible; \`download\` and \`sql\` are caller errors — a URL that could not be
+ *  fetched and a statement SQLite rejected — which used to arrive as
+ *  \`internal\` and look like viewer bugs; \`cancelled\` answers a command the
+ *  caller aborted (an \`AbortSignal\`, or a timeout — both tell the viewer to
+ *  stop). */
+export type TredespaceErrorCode =
+  | 'bad-payload'
+  | 'not-ready'
+  | 'busy'
+  | 'not-found'
+  | 'download'
+  | 'sql'
+  | 'cancelled'
+  | 'internal'
+  | 'unknown-command'
+  | 'timeout'
+  | 'transport';
+
+/** Failure detail on a {@link Result}. \`msg\` is a human-readable string safe to
+ *  show a user; \`err\` is the underlying detail when there is one (the raw wire
+ *  error, or a caught exception). */
+export interface TredespaceError {
+  code: TredespaceErrorCode;
+  msg: string;
+  err?: unknown;
+}
+
+/** Rust-style result — exactly one of \`data\` / \`error\` is present. Command
+ *  methods resolve this and NEVER throw; check \`error\` (or \`data\`).
+ *
+ *  \`\`\`ts
+ *  const res = await client.selectionSet(['/SITE/PIPE-01']);
+ *  if (res.error) console.warn(res.error.msg);
+ *  else console.log(res.data.matched);
+ *  \`\`\` */
+export interface Result<T> {
+  data?: T;
+  error?: TredespaceError;
+}
+
+/** The viewer's GPU state as far as the API can tell: the viewport boots in
+ *  parallel with the API, so \`app.ready\` usually reports \`booting\`;
+ *  {@link TredespaceClient.appInfo} gives the current answer and \`app.error\`
+ *  reports a failure. */
+export type GpuState = 'booting' | 'ok' | 'failed';
+
+/** Payload of \`app.ready\` and response of \`app.info\`: the viewer version, the
+ *  protocol number, every command and event this viewer has (what
+ *  {@link TredespaceClient.supports} answers from) and the GPU state. */
+export interface AppReady {
+  version: string;
+  api: number;
+  commands: string[];
+  events: string[];
+  gpu: GpuState;
+}
+
+/** Payload of \`app.error\`: the viewer keeps answering commands (SQL, assets,
+ *  the bus…) but its viewport is gone — WebGPU failed to initialise
+ *  (\`gpu-init\`), the device was lost (\`gpu-lost\`), or a recovery attempt
+ *  failed (\`gpu-recovery\`). Only a reload brings rendering back. */
+export interface AppErrorEvent {
+  code: 'gpu-init' | 'gpu-lost' | 'gpu-recovery';
+  message: string;
+}
+
+/** Payload of \`app.bye\`: the viewer page is unloading (reload, navigation,
+ *  tab close) or entering the back-forward cache. */
+export interface AppByeEvent {
+  reason: 'unload';
+}
+
+/** What \`nav.fitVisible\` frames while clip volumes are on: \`visible\`
+ *  (default) = the visible box cut down to the volumes' envelope; \`bbox\` =
+ *  the volumes' envelope itself. */
+export type FitVisibleBounds = 'visible' | 'bbox';
+
+export interface SelectionSetResult {
+  matched: number;
+  missed: string[];
+}
+
+export interface SelectionGetResult {
+  /** selected items (children included) */
+  count: number;
+  /** selection ROOTS as fullnames — what was clicked / set; a tree root
+   *  stands for its whole subtree. Empty after invert or a viewport
+   *  rectangle select, which have no roots — use \`items\` for those. */
+  fullnames: string[];
+  /** with { items: true }: every selected NODE's fullname — the leaves and
+   *  the grouping entries above them (every row the tree highlights, not
+   *  just the roots) — because the real tag is often on a parent row and
+   *  which level varies per model; minus \`skip\` prefixes, capped at
+   *  maxItems (default 10 000) */
+  items?: string[];
+  /** with { items: true }: the true number of selected nodes (after skip) */
+  itemCount?: number;
+  /** with { items: true }: \`items\` was cut at maxItems */
+  truncated?: boolean;
+  /** with { parents: true }: every ancestor of a selected node — the rows
+   *  above the selection up to each model root, partially and fully selected
+   *  alike, then the model's import folders as cumulative \`folder\` paths
+   *  (\`'plant'\`, \`'plant/area-1'\`, no leading slash) — each once (a Set),
+   *  minus \`skip\` prefixes, uncapped. Independent of \`items\`; a fully
+   *  selected assembly appears in both. */
+  parents?: string[];
+}
+
+export interface SelectionGetOptions {
+  /** also return every selected node's fullname (grouping entries and
+   *  leaves, children included) */
+  items?: boolean;
+  /** drop nodes whose name STARTS WITH any of these (case-insensitive; a
+   *  trailing \`*\` is accepted): \`['FRAME', 'BRACKET*']\` */
+  skip?: string[];
+  /** cap for \`items\` (default 10 000) — a whole-model selection can be
+   *  hundreds of thousands of names */
+  maxItems?: number;
+  /** also return every ancestor of the selection (each once), import
+   *  folders included — the levels above what was selected, where a tag is
+   *  often carried */
+  parents?: boolean;
+}
+
+/** A wireframe sphere drawn IN the scene at an annotation's point (a label's
+ *  anchor, every point of a measurement) — depth tested against the model, so
+ *  the point reads at its true depth, unlike the flat overlay glyphs. */
+export interface SphereMarker {
+  /** radius, metres */
+  size: number;
+  /** \`#rrggbb\` */
+  color: string;
+  /** filled sphere (shaded, \`opacity\` applies) instead of a wireframe;
+   *  default false */
+  solid?: boolean;
+  /** fill opacity 0..1 for a solid sphere; 1 = opaque (writes depth);
+   *  default 0.6 */
+  opacity?: number;
+}
+
+export interface LabelInput {
+  /** shown text — supports **bold** and newlines in rich mode. Omit it with a
+   *  \`fullname\` to label the item by its own name (what the panel's tag import
+   *  does); a point-anchored label without text is blank. */
+  text?: string;
+  /** anchor to a model item by fullname (bounds centre)… */
+  fullname?: string;
+  /** when the text comes from \`fullname\`, drop the model's leading '/' from
+   *  what is SHOWN — the label still links to the full name, so selection and
+   *  colouring match. Omitted = the Labels panel's "Label text without
+   *  leading /" toggle. Ignored when \`text\` is given. */
+  stripSlash?: boolean;
+  /** …or at an explicit world-space point */
+  anchor?: [number, number, number];
+  /** \`fullname\` anchors only: when the subtree's bounds centre falls in empty
+   *  air (a bent pipe run, an L-shaped assembly), anchor on the nearest child
+   *  item's centre instead; omitted = the Labels panel's "Snap to item" */
+  snap?: boolean;
+  /** background colour, \`'#rrggbb'\` or a CSS colour name; omitted = the
+   *  Labels panel's current style */
+  bg?: string;
+  /** text colour, same forms as \`bg\`; omitted = the panel style */
+  textColor?: string;
+  /** 0-1; omitted = the panel style */
+  opacity?: number;
+  /** screen-px displacement from the anchor — what dragging the label in the
+   *  viewport produces. Non-zero draws a leader line back to the anchor. */
+  offset?: [number, number];
+  /** leader-line (and border) colour for THIS label, same forms as \`bg\`;
+   *  omitted = the panel's leader colour */
+  leaderColor?: string;
+  /** 3D sphere marker at the anchor; \`true\` = the Labels panel's current
+   *  marker; omitted = the panel style (usually none); \`null\` = none */
+  sphere?: SphereMarker | true | null;
+}
+
+export interface LabelsResult {
+  added: number;
+  /** fullnames that resolved to nothing */
+  missed: string[];
+}
+
+/** One scene label as {@link TredespaceClient.labelsGet} reports it. */
+export interface LabelInfo {
+  id: number;
+  text: string;
+  /** the linked item, or null for a hand-placed / point-anchored label */
+  fullname: string | null;
+  anchor: [number, number, number];
+  /** screen-px displacement after the user dragged it (a leader line is drawn) */
+  offset: [number, number];
+  bg: string;
+  opacity: number;
+  textColor: string;
+  /** per-label leader/border colour, or null when it follows the panel's */
+  leaderColor: string | null;
+  sphere: SphereMarker | null;
+  /** hidden in the viewport by the panel's per-label mute */
+  muted: boolean;
+}
+
+export interface MeasurePointInput {
+  pos: [number, number, number];
+}
+
+export interface MeasurementInput {
+  kind: 'point' | 'line' | 'path' | 'area' | 'diameter' | 'angle';
+  points: MeasurePointInput[];
+  /** name shown above the value — newlines and **bold** spans allowed */
+  label?: string;
+  /** 3D sphere marker at every point; \`true\` = the Measurements panel's
+   *  Config default */
+  sphere?: SphereMarker | true;
+}
+
+export interface FilterRowInput {
+  op: 'append' | 'remove';
+  /** contains | single (equals, * at start/end) | starts | ends |
+   *  wildcard (equals, * anywhere) | multi (one name per line — a line may
+   *  carry its own colour after a TAB/space/comma: \`name<TAB>#ff0000:50\`,
+   *  colour[:opacity 0-100], \`default\` = original colour) */
+  mode: 'contains' | 'single' | 'multi' | 'starts' | 'ends' | 'wildcard';
+  value: string;
+  comment?: string;
+  /** Hierarchy level (1-9) the filter is applied TO, counted like the tree
+   *  panel (import folders included): the row matches only the names at that
+   *  level and each match includes its whole subtree. Level 1 tests the
+   *  import-folder name (a hit takes everything under the folder).
+   *  0/omitted = match at any level. */
+  level?: number;
+}
+
+export interface ColorRuleInput {
+  comment?: string;
+  enabled?: boolean;
+  filters: FilterRowInput[];
+  /** \`'#rrggbb'\` or a CSS colour name ({@link TredespaceClient.colorsNames}
+   *  lists them — stored as hex); null or \`'default'\` = restore the original
+   *  colour. Anything else is rejected with \`bad-payload\`. */
+  color: string | null;
+  /** 0-1, 1 = default */
+  opacity?: number;
+  /** Scope the rule to the models loaded from this store (a known store
+   *  name); omitted/'' = every store. Keeps a rule set safe when stores hold
+   *  same-named models. An unknown name is rejected (not-found). */
+  store?: string;
+}
+
+/** A clip shape to append (sphere / cylinder / box). Only \`kind\` is required;
+ *  the rest default (center [0,0,0], radius 5, height 10, box halfExtents
+ *  [1,1,1], identity rotation, enabled, not inverted). */
+export interface ClipShapeInput {
+  kind: 'sphere' | 'cylinder' | 'box';
+  label?: string;
+  center?: [number, number, number];
+  axis?: [number, number, number];
+  radius?: number;
+  height?: number;
+  halfExtents?: [number, number, number];
+  rotation?: [number, number, number, number];
+  enabled?: boolean;
+  /** clip INSIDE the shape (a hole) instead of outside */
+  inverted?: boolean;
+  showHelper?: boolean;
+}
+
+/** The default clipping box, from {@link TredespaceClient.clipBoxGet}. */
+export interface ClipBoxState {
+  /** true when the box is actually cutting: global clipping on AND the box itself on */
+  enabled: boolean;
+  /** cut INSIDE the box (a hole) instead of outside */
+  inverted: boolean;
+  /** world-space axis-aligned bounds — exact for an unrotated box, the
+   *  envelope of its 8 corners otherwise */
+  min: [number, number, number];
+  max: [number, number, number];
+  /** the exact oriented box */
+  center: [number, number, number];
+  size: [number, number, number];
+  rotation: [number, number, number, number];
+}
+
+export interface ColorRulesResult {
+  rules: number;
+  ran: boolean;
+  matches: number[];
+}
+
+export interface ModelResetOptions {
+  /** drop every color override */
+  color?: boolean;
+  /** drop every opacity override */
+  opacity?: boolean;
+  /** unhide every hidden item */
+  hidden?: boolean;
+  /** put every moved item back on its cooked placement */
+  transform?: boolean;
+}
+
+export type ConsoleLevel = 'info' | 'warn' | 'error';
+
+/** One Console panel line, from {@link TredespaceClient.consoleGet}. */
+export interface ConsoleLine {
+  id: number;
+  level: ConsoleLevel;
+  text: string;
+}
+
+/** Which kinds \`model.reset\` actually reset (an empty request resets all). */
+export interface ModelResetResult {
+  color: boolean;
+  opacity: boolean;
+  hidden: boolean;
+  transform: boolean;
+}
+
+export interface SettingsGetResult {
+  version: string;
+  /** the persisted viewer-settings snapshot (read-only) */
+  viewer: Record<string, unknown>;
+}
+
+/** Settings → Rendering, key for key: antialiasing, culling, picking, the
+ *  VRAM budget, background & selection, outline, transparency, dark colours
+ *  and the debug views. Colours are '#rrggbb'. */
+export interface RenderingSettings {
+  /** accumulation TAA (off = MSAA only, converges instantly) */
+  fastAA: boolean;
+  /** TAA/AO accumulation target (frames) */
+  aaSamples: number;
+  /** 4× MSAA */
+  msaa4x: boolean;
+  /** render scale, canvas px per CSS px — ignored while a DPR mode below is on */
+  pixelRatio: number;
+  /** follow window.devicePixelRatio instead of pixelRatio */
+  useDevicePixelRatio: boolean;
+  /** smart render scale: 1 on mobile, native DPR on desktop (overrides both above) */
+  smartPixelRatio: boolean;
+  /** render-loop cap, frames per second */
+  fpsLimit: number;
+  /** debug: stop updating the cull result */
+  freezeCull: boolean;
+  /** metres around the camera never pixel-culled */
+  protectDist: number;
+  /** pixel-size cut while the camera moves (px) */
+  pxCut: number;
+  pxCutEnabled: boolean;
+  /** always-on floor for the pixel cut (px, 0 = off): meshlets that stay
+   *  under this projected radius are dropped with the camera at rest too */
+  pxCutAlways: number;
+  /** max meshlets the occlusion pass may newly draw in one frame (0 = no
+   *  cap) — spreads the frame after a mass unhide over several cheaper ones */
+  newMeshletCap: number;
+  /** frames to keep rendering after the view settles so a capped backlog
+   *  finishes arriving; AA frames count toward it, not on top (0 = off) */
+  settleFrames: number;
+  /** cull + draw via vertex pulling (core WebGPU) instead of multi-draw indirect */
+  vertexPull: boolean;
+  /** pick threshold %: items at/above are clickable, below pass through */
+  pickOpacityPct: number;
+  /** the VRAM budget switch */
+  vramBudgetOn: boolean;
+  /** the budget's ceiling in MB while on */
+  maxVramMb: number;
+  /** how aggressively the budget swaps */
+  vramSwapSpeed: 'relaxed' | 'normal' | 'fast';
+  /** debug: colour each zone by residency */
+  vramDebugBoxes: boolean;
+  /** budget cut: items smaller than this (m) and farther than vramCutDistM are dropped; 0 = off */
+  vramCutSizeM: number;
+  /** budget cut: distance (m) beyond which tiny items are dropped */
+  vramCutDistM: number;
+  /** budget cut: drop hidden items from budget packs */
+  vramDropHidden: boolean;
+  /** the small viewport chip showing what the budget is doing */
+  vramActivityHud: boolean;
+  /** single-sample frames while a swap burst lands, converge once at the end */
+  vramHoldAccum: boolean;
+  /** canvas background */
+  bgColor: string;
+  /** selection tint */
+  selectionColor: string;
+  /** how a selection is shown */
+  selectionStyle: 'tint' | 'outline' | 'both';
+  /** outline the item under the cursor */
+  outlineHover: boolean;
+  /** outline edge intensity 0-10 */
+  outlineStrength: number;
+  /** wide soft glow 0-1 */
+  outlineGlow: number;
+  /** blur radius 1-4 px */
+  outlineThickness: number;
+  /** pulse period in seconds, 0 = off */
+  outlinePulse: number;
+  outlineVisibleColor: string;
+  /** the occluded part of the silhouette */
+  outlineHiddenColor: string;
+  /** true = unsorted blend pass, false = alpha hash (converges under TAA) */
+  transparencyBlend: boolean;
+  /** blend variant: transparent items render solid as a backdrop behind everything opaque */
+  transparencyBackdrop: boolean;
+  /** how far (%) a backdrop item's colour moves toward the background */
+  backdropFadePct: number;
+  /** render pure-black materials as grey so they show shading */
+  darkLift: boolean;
+  /** the grey level (% luma) black is rendered at */
+  darkLiftPct: number;
+  /** debug: colour by meshlet */
+  meshletVis: boolean;
+  /** debug buffer view: off / normal / depth / item id / edge / ao */
+  debugBuf: 0 | 1 | 2 | 3 | 4 | 5;
+}
+
+/** Settings → Lighting: the shaded scene's ambient + headlight and the
+ *  sketch mode's own pair. Colours are '#rrggbb'. */
+export interface LightingSettings {
+  ambientColor: string;
+  ambientIntensity: number;
+  headlightColor: string;
+  headlightIntensity: number;
+  sketchAmbientColor: string;
+  sketchAmbientIntensity: number;
+  sketchHeadlightColor: string;
+  sketchHeadlightIntensity: number;
+}
+
+/** Settings → Edges: the common switches, the flat-shaded and the
+ *  authored-normal tuning, and sketch mode's own edge + cube look.
+ *  Colours are '#rrggbb'. */
+export interface EdgesSettings {
+  /** edge lines at geometric creases */
+  geoEdges: boolean;
+  /** edge lines at item boundaries */
+  itemEdges: boolean;
+  edgeColor: string;
+  /** draw white edges on dark surfaces */
+  whiteOnDark: boolean;
+  /** luma below which a surface counts as dark (0-1) */
+  darkThr: number;
+  /** edge lines on flat-shaded meshes */
+  flatMeshEdges: boolean;
+  fadeExp: number;
+  depthThr: number;
+  normalThr: number;
+  /** edge lines on meshes with authored normals */
+  smoothMeshEdges: boolean;
+  smoothFadeExp: number;
+  smoothDepthThr: number;
+  smoothNormalThr: number;
+  sketchEdgeColor: string;
+  sketchFadeExp: number;
+  sketchDepthThr: number;
+  sketchNormalThr: number;
+  /** sketch mode honours the edges-off switches (default: sketch always draws) */
+  sketchRespectsEdgesOff: boolean;
+  /** sketch colour-from-mesh: off = paper + ink; fill = washed surfaces (hue
+   *  for coloured ones, their own grey level for colourless ones); edges =
+   *  coloured ink, colourless meshes keeping the plain sketch ink */
+  sketchColorMode: 'off' | 'fill' | 'edges';
+  /** \`fill\` mode only: how far the paper moves from white toward the surface
+   *  colour, in percent (0 = plain paper, 100 = the hue at full strength) */
+  sketchFillPct: number;
+  sketchCubeFaceColor: string;
+  sketchCubeLineColor: string;
+  sketchCubeTextColor: string;
+  sketchCubeHoverColor: string;
+}
+
+/** Settings → Ambient Occlusion. */
+export interface AoSettings {
+  /** 0 off, 1 while moving too, 2 at rest only */
+  aoMode: 0 | 1 | 2;
+  /** world-space radius (m) */
+  aoRadius: number;
+  aoStrength: number;
+  aoSlices: number;
+  aoSamples: number;
+}
+
+/** The six view-cube faces and their names (at most 5 characters each). */
+export type GizmoLabels = Record<'front' | 'back' | 'left' | 'right' | 'top' | 'bottom', string>;
+
+/** Settings → Gizmo: the view cube's colours ('#rrggbb') and face names. */
+export interface GizmoSettings {
+  cubeFaceColor: string;
+  cubeLineColor: string;
+  cubeTextColor: string;
+  cubeHoverColor: string;
+  labels: GizmoLabels;
+}
+
+/** A settings setter's payload: any subset of the tab's keys, plus \`reset\`
+ *  to return the whole tab to defaults before the subset applies. */
+export type SettingsPatch<T> = Partial<T> & { reset?: boolean };
+
+/** What \`GPUAdapter.info\` says about one physical adapter. Chrome fills in
+ *  \`device\` and \`description\` only with "WebGPU Developer Features" on;
+ *  vendor + architecture are always there (e.g. nvidia/ampere). */
+export interface GpuAdapterInfo {
+  vendor: string;
+  architecture: string;
+  device: string;
+  description: string;
+  /** a software rasterizer (SwiftShader), not a GPU */
+  isFallback: boolean;
+}
+
+export interface GpuInfo {
+  /** the adapter the viewer is rendering on */
+  active: GpuAdapterInfo;
+  /** what each adapter hint resolves to on this machine (null = none) */
+  adapters: {
+    'high-performance': GpuAdapterInfo | null;
+    'low-power': GpuAdapterInfo | null;
+    fallback: GpuAdapterInfo | null;
+  };
+  /** the high-performance and low-power hints resolved to different adapters */
+  hasMultipleGpus: boolean;
+  /** optional WebGPU features the viewer got */
+  features: { multiDrawIndirect: boolean; timestampQuery: boolean };
+  /** the draw path in use: multi-draw indirect, vertex pull, or full */
+  cullMode: 'mdi' | 'vp' | 'full';
+  /** what the adapter offers (bytes) */
+  limits: { maxBufferSize: number; maxStorageBufferBindingSize: number };
+  /** system RAM in GB as the browser reports it (Chromium caps at 8), 0 when unknown */
+  deviceMemoryGb: number;
+  isMobile: boolean;
+}
+
+export interface AssetInfo {
+  id: string;
+  /** whatever \`meta\` the import attached — your own bookkeeping, returned
+   *  verbatim (e.g. the md5 of the COMPRESSED artifact you serve) */
+  meta?: Record<string, unknown>;
+  /** the store this asset belongs to (default 'main') */
+  store: string;
+  name: string;
+  folder: string;
+  fileName: string;
+  /** MD5 of the source bytes — compare to decide whether to re-import */
+  md5?: string;
+  size: number;
+  kind?: 'merged' | 'standard';
+  hasNormals?: boolean;
+  edges?: boolean;
+  loaded: boolean;
+}
+
+/** A store = a named group of assets (a project). 'main' always exists. */
+export interface StoreInfo {
+  name: string;
+  description: string;
+  /** everything the store holds: \`modelCount + sqlCount\` */
+  count: number;
+  /** model assets in the store */
+  modelCount: number;
+  /** SQL databases in the store */
+  sqlCount: number;
+}
+
+/** Conversion pipeline for an imported file. \`tdp\` is an already-cooked
+ *  TreDeSpace file (e.g. a viewer export or a server-hosted model): it is
+ *  stored as-is — no conversion — with its coarse (VRAM-budget) variant
+ *  rebuilt in-app and its recorded md5 being the hash of the \`.tdp\` bytes
+ *  themselves. */
+export type ImportFormat = 'glb-merged' | 'glb-standard' | 'rvm' | 'ifc' | 'step' | 'tdp';
+
+export interface AssetsImportResult {
+  entries: AssetInfo[];
+  /** how many prior assets were removed by \`replace\` (0 unless replace was set) */
+  replaced: number;
+}
+
+/** {@link TredespaceClient.viewScreenshot} by default: the PNG as raw bytes,
+ *  transferred (never copied, never base64). */
+export interface ScreenshotBytes {
+  bytes: ArrayBuffer;
+  /** always \`image/png\` today */
+  mime: string;
+  width: number;
+  height: number;
+}
+
+/** {@link TredespaceClient.viewScreenshot} with \`{ dataUrl: true }\`. */
+export interface ScreenshotDataUrl {
+  dataUrl: string;
+  mime: string;
+  width: number;
+  height: number;
+}
+
+/** One file for {@link TredespaceClient.assetsImportUrl}: a URL the VIEWER
+ *  downloads itself, plus the pipeline to cook it with. \`format\` is required
+ *  (a \`.glb\` URL is ambiguous — merged vs standard — so no format is inferred
+ *  on the wire; infer it host-side from the extension if you like). */
+export interface ImportUrlFile {
+  /** URL the viewer fetches (subject to the VIEWER origin's CORS, not yours). */
+  url: string;
+  format: ImportFormat;
+  /** metadata to store with the produced asset(s) and read back from
+   *  \`assetsList\` — a converter that yields several assets tags them all */
+  meta?: Record<string, unknown>;
+  /** name to store the asset under; defaults to the URL's last path segment. */
+  fileName?: string;
+  folder?: string;
+  /** per-format options, e.g. \`{ normals: true, edges: true }\` for glb-standard. */
+  options?: Record<string, unknown>;
+}
+
+/** Per-file outcome within an {@link AssetsImportUrlResult}. Exactly one batch
+ *  entry per input file, in input order; a failure here never aborts the rest. */
+export interface AssetsImportUrlEntry {
+  url: string;
+  ok: boolean;
+  /** assets produced (present when \`ok\`). */
+  entries?: AssetInfo[];
+  /** prior assets removed by \`replace\` for this file (present when \`ok\`). */
+  replaced?: number;
+  /** why this file failed (present when not \`ok\`) — download or convert error. */
+  error?: string;
+}
+
+export interface AssetsImportUrlResult {
+  /** number of files that imported successfully. */
+  imported: number;
+  /** number of files that failed (download or convert). */
+  failed: number;
+  results: AssetsImportUrlEntry[];
+}
+
+/** Progress tick for {@link TredespaceClient.assetsImportUrl} — one per phase
+ *  change. \`completed\`/\`total\` count whole files; \`phase\` is what just started
+ *  (\`download\`/\`convert\`) or ended (\`done\`/\`error\`) for \`url\`. */
+/** Progress tick for one file in an {@link TredespaceClient.assetsImportUrl}
+ *  batch. Files run in parallel, so ticks for several \`index\`es interleave —
+ *  key your UI on \`index\` (its position in the \`files\` array you passed), not
+ *  on arrival order. \`completed\`/\`total\` count whole files across the batch. */
+export interface ImportUrlProgress {
+  completed: number;
+  total: number;
+  /** index into the \`files\` array this tick belongs to */
+  index: number;
+  url: string;
+  /** \`download\` repeats as bytes arrive; \`convert\` once the cook starts;
+   *  \`done\` / \`error\` end that file. */
+  phase: 'download' | 'convert' | 'done' | 'error';
+  /** bytes downloaded so far (download phase only) */
+  loaded?: number;
+  /** total bytes, when the server sent a content-length (download phase only) */
+  totalBytes?: number;
+}
+
+/** One SQLite database in OPFS (\`sql_assets/<store>/<file>\`). Stores are shared
+ *  with model assets. \`path\` is what you pass as \`mainDb\` to \`sqlQuery\`, and
+ *  what an ATTACH string literal references. */
+export interface SqlDbInfo {
+  store: string;
+  /** whatever \`meta\` the import attached, returned verbatim */
+  meta?: Record<string, unknown>;
+  fileName: string;
+  path: string;
+  size: number;
+  modified: number;
+  /** MD5 of the source bytes AS DELIVERED at import time — compare against a
+   *  hash of the hosted file to decide whether to re-import. Recorded before
+   *  the WAL normalization rewrites the stored file and never updated by
+   *  later in-app edits. Absent for databases imported before this existed or
+   *  created in-app. */
+  md5?: string;
+}
+
+export interface SqlImportResult {
+  /** OPFS paths of the databases written. */
+  imported: string[];
+  /** file names skipped — already existed without \`replace\`, or the file was locked. */
+  skipped: string[];
+  /** how many existing databases were overwritten. */
+  replaced: number;
+}
+
+/** One file for {@link TredespaceClient.sqlImportUrl}: a URL the VIEWER
+ *  downloads itself, streamed straight into OPFS. */
+export interface SqlImportUrlFile {
+  /** URL the viewer fetches (subject to the VIEWER origin's CORS, not yours). */
+  url: string;
+  /** name to store the database under; defaults to the URL's last path segment. */
+  fileName?: string;
+  /** metadata to store with it and read back from \`sqlList\` */
+  meta?: Record<string, unknown>;
+}
+
+/** Progress tick for a SQL import. \`download\` repeats as bytes arrive (URL
+ *  imports), \`import\` = writing into OPFS + the WAL normalization, then
+ *  \`done\` / \`error\`. Files are imported one at a time, so \`completed\`/\`total\`
+ *  give you "fetching file X of Y" and \`loaded\`/\`totalBytes\` the percentage. */
+export interface SqlImportProgress {
+  completed: number;
+  total: number;
+  /** index into the \`files\` array you passed */
+  index: number;
+  fileName: string;
+  /** the URL being fetched (URL imports only) */
+  url?: string;
+  phase: 'download' | 'import' | 'done' | 'error';
+  /** bytes downloaded so far (download phase) */
+  loaded?: number;
+  /** total bytes, when the server sent a content-length */
+  totalBytes?: number;
+}
+
+export interface SqlImportUrlResult extends SqlImportResult {
+  /** files whose download or write failed — never aborts the rest of the batch. */
+  failed: { url: string; error: string }[];
+}
+
+/** Sandbox opt-ins for an external app's iframe, beyond the base every app
+ *  gets (scripts on its own origin, forms, downloads). Top navigation is never
+ *  available — it would let a tool redirect the whole viewer.
+ *  - \`'popups'\`: window.open / target=_blank open a normal tab (the popup
+ *    escapes the sandbox — a sandboxed popup is useless for sign-in flows).
+ *  - \`'modals'\`: alert / confirm / prompt / print.
+ *  - \`'pointer-lock'\`: capture the mouse.
+ *  - \`'storage-access'\`: the page may ask for its OWN unpartitioned cookies and
+ *    storage through the Storage Access API (a browser prompt) — for an SSO
+ *    session that does not reach a nested frame. Never anything of the
+ *    viewer's. */
+export type ExternalAppSandboxOption = 'popups' | 'modals' | 'pointer-lock' | 'storage-access';
+
+/** Browser features an external app's iframe may be delegated through its
+ *  \`allow\` attribute (Permissions Policy). None is delegated unless listed —
+ *  the browser default for a cross-origin frame. */
+export type ExternalAppPermission =
+  | 'camera'
+  | 'microphone'
+  | 'geolocation'
+  | 'fullscreen'
+  | 'clipboard-read'
+  | 'clipboard-write'
+  | 'autoplay'
+  | 'display-capture'
+  | 'publickey-credentials-get'
+  | 'identity-credentials-get'
+  | 'web-share'
+  | 'picture-in-picture'
+  | 'payment';
+
+/** One SESSION-ONLY external app entry for
+ *  {@link TredespaceClient.externalAppsSet}. Mirrors the Settings → External
+ *  fields; only \`name\` and \`url\` are required. */
+export interface HostExternalApp {
+  /** Optional STABLE id (1–64 of letters, digits, \`_ . : -\`, unique in the
+   *  call): a later {@link TredespaceClient.externalAppsSet} with the same id
+   *  is the same app — its button, tooltip and config update while any open
+   *  panel or dialog of it keeps running. Omit it and the entry gets a fresh
+   *  id every call. */
+  id?: string;
+  /** ribbon button + panel title */
+  name: string;
+  url: string;
+  /** ribbon section title — apps sharing a section are grouped together */
+  section?: string;
+  /** ribbon button size (default 'medium') */
+  size?: 'big' | 'medium' | 'small';
+  tooltip?: string;
+  /** allow several instances of this app open at once */
+  multiple?: boolean;
+  /** open in a new browser tab instead of an in-app panel (never auto-opened —
+   *  window.open without a user gesture is popup-blocked). The tab keeps the
+   *  viewer as \`window.opener\` and can drive it directly (see the file
+   *  header, "A TAB THE VIEWER OPENED"). */
+  newWindow?: boolean;
+  /** open as a centered modal dialog over the app */
+  modal?: boolean;
+  /** Put the button on the HOME ribbon instead of External — for a tool the
+   *  user should see immediately (a project selector, a report picker). It
+   *  shows in one place, not both; \`section\` still titles its group. */
+  home?: boolean;
+  /** Which end of the Home ribbon the group sits at: \`'start'\` (default) puts
+   *  it before the viewer's own Home groups, \`'end'\` after them. Ignored
+   *  unless \`home\` is set. */
+  homeAt?: 'start' | 'end';
+  /** open immediately when this set call lands (e.g. a project selector) */
+  openOnStart?: boolean;
+  /** Config passed to the page as a stringified \`?config=\` URL param — pass an
+   *  object and the viewer stringifies it.
+   *
+   *  For a \`modal\` app it ALSO sets the dialog's initial size: \`width\` /
+   *  \`height\` accept \`"600px"\`, \`"60%"\` (of the viewport) or a bare number
+   *  (px). Both default to \`"70%"\`, which is a lot of screen for a small
+   *  form — set them explicitly for compact dialogs. The dialog is capped at
+   *  96vw × 96vh, and the user can still move it by its title bar and resize
+   *  it from the bottom-right corner.
+   *
+   *  \`\`\`ts
+   *  { name: 'Picker', url: '…', modal: true,
+   *    config: { width: '480px', height: '320px', project: 'plant-7' } }
+   *  \`\`\` */
+  config?: string | Record<string, unknown>;
+  /** Sandbox opt-ins for the page's iframe — see
+   *  {@link ExternalAppSandboxOption}. OPTIONAL: omit for the base policy every
+   *  app has always had. Unknown values are rejected as \`bad-payload\`. */
+  sandbox?: ExternalAppSandboxOption[];
+  /** Browser features delegated to the page through the iframe \`allow\`
+   *  attribute — see {@link ExternalAppPermission}. OPTIONAL: omit for none.
+   *  The permission prompt names the VIEWER's origin, not the page's, and a
+   *  viewer that is itself embedded can only pass on what its own host granted
+   *  it in ITS \`allow\`. Unknown values are rejected as \`bad-payload\`. */
+  allow?: ExternalAppPermission[];
+}
+
+/** Progress tick for one model in an {@link TredespaceClient.assetsLoad} or
+ *  {@link TredespaceClient.assetsSetLoaded} batch. Models load in parallel, so
+ *  ticks interleave — \`index\` is the model's position in the ids you passed
+ *  (for \`assetsSetLoaded\`, in the subset it actually had to load). */
+export type LoadProgressFn = (p: LoadProgress) => void;
+
+export interface LoadProgress {
+  completed: number;
+  total: number;
+  index: number;
+  /** the asset id this tick is about */
+  id: string;
+  /** \`error\` = that model failed to load; the batch continues either way */
+  phase: 'done' | 'error';
+}
+
+/** A camera placement. The viewer's camera is ORBIT-based (Z-up): a pivot
+ *  \`target\` plus \`azimuth\` / \`elevation\` (radians) and \`distance\` from the
+ *  pivot. Give an eye \`position\` instead and the viewer converts — pass
+ *  \`position\` + \`target\` if you think in eye points. Anything omitted keeps
+ *  its current value, so \`{ target: [x, y, z] }\` re-pivots without turning. */
+export interface CameraInput {
+  /** eye point; converted to azimuth/elevation/distance around \`target\` */
+  position?: [number, number, number];
+  /** look-at pivot (defaults to the current pivot) */
+  target?: [number, number, number];
+  /** radians — ignored when \`position\` is given */
+  azimuth?: number;
+  /** radians, +Z up — ignored when \`position\` is given */
+  elevation?: number;
+  /** distance from \`target\` — ignored when \`position\` is given */
+  distance?: number;
+  orthographic?: boolean;
+  /** glide there (default) or snap with \`false\` */
+  animate?: boolean;
+}
+
+/** The camera's current placement, from {@link TredespaceClient.cameraGet}. */
+export interface CameraState {
+  target: [number, number, number];
+  /** eye point, derived from the orbit parameters */
+  position: [number, number, number];
+  azimuth: number;
+  elevation: number;
+  distance: number;
+  orthographic: boolean;
+}
+
+/** One external app the viewer hosts right now — a modal dialog or a dock
+ *  panel — from {@link TredespaceClient.uiDialogs}. */
+export interface DialogInfo {
+  /** dialog id (\`<appId>:<n>\`) or dock panel id (\`ext:<appId>[:<suffix>]\`) —
+   *  what the ui.dialog* methods address it by */
+  id: string;
+  /** a centered modal dialog, or an external-app dock panel (a tab) */
+  kind: 'dialog' | 'panel';
+  /** the \`?tdsDialogId=\` the page itself sees on its URL: stable per app for
+   *  a single-instance dialog (close → reopen gets the same one), fresh per
+   *  open for a \`multiple\` one — what the page keys its saved state by. The
+   *  ui.dialog* methods accept it in place of \`id\`, so a page can address
+   *  itself by the value it already has. */
+  tdsDialogId: string;
+  /** the external-app entry it was opened from */
+  appId: string;
+  /** the title shown — the app entry's name until \`uiDialogRename\` changes it */
+  name: string;
+  url: string;
+  /** hidden but still mounted (its page keeps running and keeps its state);
+   *  always false for a panel */
+  hidden: boolean;
+  /** a held close is under way: the page asked to be told first
+   *  (\`onDialogClosing\`) and is flushing state, already hidden, until it is
+   *  done or the timeout passes */
+  closing: boolean;
+}
+
+/** One \`dialog.changed\` event, from {@link TredespaceClient.onDialogChanged}:
+ *  the dialog or panel as {@link DialogInfo} lists it plus what just happened
+ *  to it. \`hidden\` / \`shown\` are the \`uiDialogHide\` / \`uiDialogShow\` round
+ *  trip (modal dialogs only; the page stays mounted); \`closing\` is a held
+ *  close under way — the page asked to be told first (\`onDialogClosing\`) and
+ *  is flushing state while its dialog / tab is already hidden; \`closed\` is
+ *  the unmount, whichever way it happened (the ✕ on the title bar or tab,
+ *  \`uiClose\`, \`uiDialogClose\`, a host replacing the app set, a layout swap
+ *  dropping a panel); \`renamed\` follows \`uiDialogRename\`. */
+export interface DialogChangedEvent extends DialogInfo {
+  state: 'opened' | 'hidden' | 'shown' | 'renamed' | 'closing' | 'closed';
+}
+
+/** One configured external app, from {@link TredespaceClient.externalAppsList}. */
+export interface ExternalAppInfo {
+  id: string;
+  name: string;
+  url: string;
+  section: string;
+  size: 'big' | 'medium' | 'small';
+  multiple: boolean;
+  newWindow: boolean;
+  modal: boolean;
+  openOnStart: boolean;
+  /** button lives on the Home ribbon rather than External */
+  home: boolean;
+  /** which end of the Home ribbon it sits at */
+  homeAt: 'start' | 'end';
+  /** sandbox opt-ins beyond the base policy (empty = base) */
+  sandbox: ExternalAppSandboxOption[];
+  /** browser features delegated through the iframe \`allow\` attribute (empty = none) */
+  allow: ExternalAppPermission[];
+  /** true = session-only entry set through the API; false = user-configured in Settings */
+  hostManaged: boolean;
+}
+
+/** The whole viewpoint set as one JSON-safe blob — exactly what the panel's
+ *  Save button writes to file. Treat it as opaque: persist it, hand it back
+ *  to {@link TredespaceClient.viewpointsSet}, done. */
+export interface ViewpointsConfig {
+  version: number;
+  viewpoints: unknown[];
+}
+
+/** Payload of the unsolicited \`viewpoints.bookmark\` event — fired when the
+ *  user clicks the host-configured bookmark button in the Viewpoints panel.
+ *  Carries the CURRENT config so no follow-up \`viewpointsGet\` is needed. */
+export interface ViewpointsBookmarkEvent {
+  /** the configured button label (identifies which button, if you rename it) */
+  label: string;
+  config: ViewpointsConfig;
+}
+
+/** One database referenced by a script, from {@link TredespaceClient.sqlCheck}. */
+export interface SqlCheckEntry {
+  /** OPFS path (\`sql_assets/<store>/<file>\`) — the \`mainDb\` you passed or an
+   *  \`ATTACH DATABASE '…'\` literal from the script. */
+  path: string;
+  exists: boolean;
+  /** present only when \`exists\` */
+  size?: number;
+  modified?: number;
+  /** import-time md5 of the delivered bytes (see {@link SqlDbInfo.md5});
+   *  absent when \`exists\` is false or the db predates md5 recording. */
+  md5?: string;
+}
+
+/** One statement of the script passed to {@link TredespaceClient.sqlCheck},
+ *  as it would actually run. */
+export interface SqlCheckStatement {
+  /** the statement text with comments stripped and whitespace trimmed — a
+   *  script that is nothing but comments yields no entries at all */
+  sql: string;
+  /** leading keyword, lower-cased: \`'select'\`, \`'with'\`, \`'attach'\`,
+   *  \`'pragma'\`, \`'create'\`, … (\`''\` when the statement starts with a
+   *  non-word character) */
+  kind: string;
+  /** expected to answer with a result set — the \`select\` / \`with\` / \`values\` /
+   *  \`pragma\` / \`explain\` forms, plus anything carrying \`RETURNING\` */
+  returnsRows: boolean;
+  /** the database path an \`attach\` statement references */
+  attach?: string;
+}
+
+export interface SqlStatementResult {
+  /** column names, or null for a statement that returned no result set. */
+  columns: string[] | null;
+  /** result rows as compact value arrays (parallel to \`columns\`). */
+  rows: unknown[];
+  /** total rows the statement produced, before any \`maxRows\` truncation. */
+  rowCount: number;
+  /** present + true when \`rows\` was cut to \`maxRows\`. */
+  truncated?: boolean;
+}
+
+/** One statement of a \`sqlExecute\` batch — the contract the viewer's SQL
+ *  editor (and the original sqllitedebug tool) run on. */
+export interface SqlStatementInput {
+  /** label echoed in the result and in statement-progress ticks */
+  name?: string;
+  sql: string;
+  /** One value array per execution. Several rows = the statement is prepared
+   *  once and stepped per row (bulk INSERT without a giant SQL string);
+   *  exactly one row = a plain bound statement. \`null\` binds NULL. */
+  binding?: (string | number | null)[][];
+  /** keep this statement's rows (default false — a write returns nothing) */
+  collect?: boolean;
+}
+
+export interface SqlExecuteStatementResult extends SqlStatementResult {
+  /** the \`name\` you gave, when any */
+  name?: string;
+}
+
+export interface SqlExecuteResult {
+  /** one entry per statement, in order; rows only for \`collect: true\` */
+  statements: SqlExecuteStatementResult[];
+  ms: number;
+}
+
+/** Progress tick for a \`sqlExecute\` batch. \`statement\` ticks fire as each
+ *  statement FINISHES (\`no\` = its index, \`total\` = statement count, \`name\` its
+ *  label when given); \`row\` ticks fire every \`progressSize\` rows within the
+ *  current statement (\`total\` is null — sqlite can't know it up front). */
+export interface SqlExecuteProgress {
+  type: 'statement' | 'row';
+  no: number;
+  total: number | null;
+  name?: string;
+}
+
+/** One FILTER_ARGS entry for a report-shaped SQL call: \`value\` is one row,
+ *  \`values\` one row per entry — read them back with
+ *  \`select v from FILTER_ARGS where k = '…'\`. */
+export interface SqlFilterInput {
+  key: string;
+  value?: string | number;
+  values?: string[];
+}
+
+/** Common payload of the report-shaped SQL commands. \`mainDb\` may be omitted
+ *  when the SQL only ATTACHes files. */
+export interface SqlRunInput {
+  sql: string;
+  mainDb?: string;
+  /** extra database paths to lock alongside (ATTACH literals are found anyway) */
+  attach?: string[];
+  filters?: SqlFilterInput[];
+}
+
+/** The outputs a report offers: a table, a coloring of the model, a
+ *  click-following detail form. */
+export type SqlReportType = 'TABLE' | 'COLORING' | 'DETAIL';
+
+/** One filter of the SQL Editor draft — the saved-report shape, richer than
+ *  {@link SqlFilterInput}: INPUT holds its \`value\`; DROPDOWN holds the
+ *  \`dropdownSql\` listing its options (\`?\` binds the search term, \`searchValue\`
+ *  is the default bind, usually '%') and the \`selected\` ids. A \`dropdownSql\`
+ *  names its columns \`id\` and \`label\` — read by name, in any order; a query
+ *  naming neither is read positionally (first the id, second the text). */
+export interface SqlEditorFilter {
+  kind: 'INPUT' | 'DROPDOWN';
+  /** FILTER_ARGS.k — the SQL reads \`select v from FILTER_ARGS where k='…'\`. */
+  key: string;
+  label: string;
+  value?: string;
+  searchValue?: string;
+  dropdownSql?: string;
+  selected?: string[];
+  /** DROPDOWN: one pick only instead of several; the value stays a list,
+   *  holding at most one id. Default multi. */
+  single?: boolean;
+}
+
+/** The SQL Editor's draft as {@link TredespaceClient.sqlEditorGet} returns it
+ *  and {@link TredespaceClient.sqlEditor} takes it back. \`title\` is the
+ *  report name. */
+export interface SqlEditorDraft {
+  title: string;
+  description: string;
+  mainDb: string;
+  types: SqlReportType[];
+  sql: string;
+  filters: SqlEditorFilter[];
+  /** Every database a run locks: the main db + ATTACH'd paths. */
+  databases: string[];
+}
+
+/** A host's own Set Color configuration — the same \`rules\` shape
+ *  {@link TredespaceClient.colorRulesSet} takes, plus the run mode. Pass one
+ *  with \`custom-set\` to paint a config you store yourself (the viewer's Set
+ *  Color panel is neither read nor written). */
+export interface SetColorConfig {
+  rules: ColorRuleInput[];
+  /** 'reset' (default) clears existing overrides first, 'append' layers,
+   *  'hide' hides everything the rules do not match */
+  mode?: 'reset' | 'append' | 'hide';
+}
+
+/**
+ * How a colouring result is painted: a base coat over the whole model, then
+ * the matched names on top. The \`default-*\` types are the viewer's own
+ * buttons; the \`custom-*\` ones let you pick the highlight colour and bring
+ * your own base or rule set. Every opacity here is 0-1.
+ *
+ * A colour is \`'#rrggbb'\` or a CSS colour name — {@link TredespaceClient.colorsNames}
+ * lists the ~147 the viewer knows, and the same tokens work in a query's
+ * \`fullname_color\` column.
+ */
+export type ColorMode =
+  /** everything white, the hits in their own colours (yellow by default) */
+  | { type: 'default-white' }
+  /** everything hidden, the hits re-shown — an isolate */
+  | { type: 'default-hidden' }
+  /** white base at \`opacity\` (default 0.1): the model stays faintly visible */
+  | { type: 'default-transparent'; opacity?: number }
+  /** the viewer's LIVE Set Color rules as the base (its state is only read) */
+  | { type: 'default-set' }
+  /** your colour for hits that carry none, over a base you choose */
+  | {
+      type: 'custom-color';
+      color: string;
+      /** opacity for the hits (default: fully opaque) */
+      opacity?: number;
+      /** base coat; 'none' paints the hits over the model as it is (default 'white') */
+      base?: 'white' | 'transparent' | 'hidden' | 'none';
+      /** 'transparent' base only (default 0.1) */
+      baseOpacity?: number;
+    }
+  /** your own Set Color config as the base, then the hits on top */
+  | { type: 'custom-set'; color?: string; opacity?: number; setConfig: SetColorConfig };
+
+export interface SqlColorResult {
+  /** the \`type\` of the mode that ran */
+  mode: string;
+  /** distinct fullnames the query returned — the rows themselves never left
+   *  the viewer */
+  rows: number;
+  ms: number;
+}
+
+export interface SqlSelectResult {
+  /** distinct fullnames the query returned */
+  rows: number;
+  /** how many resolved to something in the loaded models */
+  matched: number;
+  /** how many resolved to nothing */
+  missed: number;
+  ms: number;
+}
+
+/** One entry of a binary name list — what {@link encodeNameList} takes and
+ *  {@link decodeNameList} gives back. */
+export interface NameListEntry {
+  fullname: string;
+  /** '#ff0000', 'yellow', or 'default' to restore the mesh colour */
+  color?: string;
+  /** 0-100; omitted (or 100) = opaque */
+  opacity?: number;
+}
+
+export interface NameListResult {
+  /** names in the list you sent */
+  names: number;
+}
+
+export interface SelectionListResult extends NameListResult {
+  matched: number;
+  missed: number;
+}
+
+export interface SqlQueryResult {
+  /** one entry per statement in the script, in order. */
+  statements: SqlStatementResult[];
+  /** wall-clock milliseconds for the run. */
+  ms: number;
+}
+
+/** One ancestor of a clicked tree row. \`folder\` entries are import folders
+ *  (with their cumulative path); \`node\` entries are model hierarchy levels. */
+export interface TreeSelectParent {
+  name: string;
+  type: 'folder' | 'node';
+  /** cumulative folder path — folder parents only */
+  path?: string;
+}
+
+/** Unsolicited \`tree.select\` event: the user clicked a row in the tree view,
+ *  picked an item in the viewport, or walked the selection with U / P. */
+export interface TreeSelectEvent {
+  /** fullname of the clicked node (folder path for folder rows) */
+  fullname: string;
+  name: string;
+  /** true for import folders and hierarchy nodes with children */
+  folder: boolean;
+  /** the import folder the model lives in (item rows only) */
+  group?: string;
+  /** every parent up to the root, outermost first */
+  parents: TreeSelectParent[];
+}
+
+// ── client ───────────────────────────────────────────────────────────────────
+
+/**
+ * Encode fullnames as the binary list the viewer's packed path reads:
+ * UTF-8, one \`fullname\` (or \`fullname\\tcolor[:opacity]\`) per line. Hand the
+ * result to {@link TredespaceClient.selectionSetList} or
+ * {@link TredespaceClient.colorApplyList} — it is transferred, so a million
+ * names cost one buffer instead of a million JSON strings on each side.
+ * Names are matched case-insensitively by the viewer.
+ */
+export function encodeNameList(entries: readonly (string | NameListEntry)[]): ArrayBuffer {
+  const lines: string[] = [];
+  for (const e of entries) {
+    if (typeof e === 'string') {
+      const name = e.trim();
+      if (name) {
+        lines.push(name);
+      }
+      continue;
+    }
+    const name = (e.fullname ?? '').trim();
+    if (!name) {
+      continue;
+    }
+    if (!e.color) {
+      lines.push(name);
+      continue;
+    }
+    const op = e.opacity == null || e.opacity >= 100 ? '' : \`:\${Math.max(0, Math.round(e.opacity))}\`;
+    lines.push(\`\${name}\\t\${e.color}\${op}\`);
+  }
+  return new TextEncoder().encode(lines.join('\\n')).buffer as ArrayBuffer;
+}
+
+/** Read a binary name list back (the inverse of {@link encodeNameList}) — for
+ *  a list you cached, or one you received from elsewhere. */
+export function decodeNameList(bytes: ArrayBuffer | Uint8Array): NameListEntry[] {
+  const text = new TextDecoder().decode(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  const out: NameListEntry[] = [];
+  for (const raw of text.split(/\\r?\\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      continue;
+    }
+    const m = line.match(/^(.*?)[\\t, ]+([^\\t, ]+)$/);
+    const head = m?.[1].trim();
+    if (!m || !head) {
+      out.push({ fullname: line });
+      continue;
+    }
+    const [color, op] = m[2].split(':');
+    const opacity = op === undefined || op === '' ? undefined : Number(op);
+    out.push({
+      fullname: head,
+      color,
+      ...(opacity !== undefined && Number.isFinite(opacity) ? { opacity } : {}),
+    });
+  }
+  return out;
+}
+
+export interface TredespaceClientOptions {
+  /** The viewer's origin, e.g. 'https://viewer.example.com'. Required. A full
+   *  URL is fine — only its origin is kept (\`'https://portal.example.com/tredespace'\`
+   *  for a path-proxied viewer becomes \`'https://portal.example.com'\`), since
+   *  replies arrive with the bare origin and are matched against it. */
+  targetOrigin: string;
+  /** Aborting this signal calls \`dispose()\` — one AbortController can own the
+   *  client AND every subscription made with \`{ signal }\`. */
+  signal?: AbortSignal;
+  /** Per-command timeout (ms). Imports use importTimeoutMs. Default 30 000. */
+  timeoutMs?: number;
+  /** Timeout for assets.import (conversions can be long). Default 600 000. */
+  importTimeoutMs?: number;
+  /** A command sent before \`app.ready\` waits for it (up to the command's own
+   *  timeout) instead of being answered \`not-ready\`. Default true; \`false\`
+   *  posts at once, as earlier SDKs did. */
+  waitForReady?: boolean;
+}
+
+/** Payload of the local \`client.closed\` event — this client's link ended and
+ *  it now behaves as disposed (pending requests settled with a \`transport\`
+ *  error, nothing fires after it). */
+export interface ClientClosedEvent {
+  /** \`disposed\`: \`dispose()\` was called or the constructor signal aborted.
+   *  \`relay\`: the opener relaying for this client ended the relay, disposed
+   *  its client or unloaded its page. \`target\`: the target window was found
+   *  closed — Window targets are watched; an iframe element is not (its host
+   *  owns that DOM and disposes). */
+  reason: 'disposed' | 'relay' | 'target';
+}
+
+/** Payload of the local \`relay.changed\` event (opener side, one per window
+ *  passed to \`relay()\`). */
+export interface RelayChangedEvent {
+  /** the relayed window, as passed to \`relay()\` */
+  window: Window;
+  /** the relayed window's origin (\`relay()\`'s \`origin\` reduced to a bare origin) */
+  origin: string;
+  /** \`connected\`: the page in that window constructed its client — again
+   *  after every navigation, so an SSO round trip reconnects by itself.
+   *  \`disconnected\`: that client disposed or its page is unloading
+   *  (navigating or closing); the relay stays. \`closed\`: the window is gone
+   *  and the relay was dropped. */
+  state: 'connected' | 'disconnected' | 'closed';
+}
+
+/** Options for \`relay()\`. */
+export interface RelayOptions {
+  /** The relayed window's origin — mandatory and concrete, never \`'*'\`: it
+   *  filters what the relay accepts from the window and is the targetOrigin
+   *  of everything posted back to it. A full URL is reduced to its origin,
+   *  like \`targetOrigin\`. */
+  origin: string;
+  /** Aborting the signal ends the relay, like the returned function. */
+  signal?: AbortSignal;
+}
+
+/** Options for \`on()\` and the typed \`on*\` helpers. */
+export interface SubscribeOptions {
+  /** Aborting the signal unsubscribes — the \`addEventListener\` idiom, so one
+   *  AbortController can end many subscriptions (and the client) at once. */
+  signal?: AbortSignal;
+}
+
+// ── custom-event bus ─────────────────────────────────────────────────────────
+
+/** Where a connected page sits relative to the viewer: the page hosting it
+ *  (\`parent\`), the page that opened it (\`opener\`), an external-app panel or
+ *  modal inside it (\`panel\`), or a tab the viewer opened (\`window\`). */
+export type ClientKind = 'parent' | 'opener' | 'panel' | 'window';
+
+/** A page connected to the viewer's postMessage API, as the viewer sees it.
+ *  The viewer assigns \`id\` (per window lifetime — a reloaded page is a new
+ *  client) and stamps \`origin\`, so neither can be spoofed. */
+export interface ClientInfo {
+  id: string;
+  origin: string;
+  kind: ClientKind;
+  /** the \`uiDialogs\` id of the panel / modal hosting a \`panel\` client */
+  dialog?: string;
+  /** chosen by that client in {@link TredespaceClient.customSubscribe} */
+  name?: string;
+  /** free-form label chosen by that client — a role, a version, anything
+   *  other pages pick recipients by */
+  tag?: string;
+  /** on the bus (receives custom events and presence changes) */
+  subscribed: boolean;
+}
+
+/** A custom event as it arrives at a subscriber. */
+export interface CustomEventPayload<T = unknown> {
+  event: string;
+  /** JSON — exactly what the sender's \`data\` gives after a JSON round trip */
+  data: T;
+  from: ClientInfo;
+  /** the ids the sender addressed, or null for a broadcast */
+  to: string[] | null;
+}
+
+export interface CustomSubscribeOptions extends SubscribeOptions {
+  /** a display name other pages see in {@link ClientInfo} */
+  name?: string;
+  /** a free-form tag other pages see in {@link ClientInfo} and can pick
+   *  recipients by — a role ('report-viewer'), a version, a project */
+  tag?: string;
+  /** only these event names reach this client; omit for every event; an
+   *  empty list = presence only (\`onClientsChanged\` without the traffic) */
+  events?: string[];
+}
+
+export interface CustomPostResult {
+  /** subscribers the event was posted to */
+  delivered: number;
+  /** ids from \`to\` that did not receive it: unknown, not subscribed,
+   *  filtered it out, or your own id (a sender never gets its own event) */
+  missed: string[];
+}
+
+export interface CustomClientsResult {
+  /** this client's own id */
+  self: string;
+  clients: ClientInfo[];
+}
+
+export interface ClientsChangedEvent {
+  clients: ClientInfo[];
+}
+
+/** Options for \`onDialogChanged\`. */
+export interface DialogSubscribeOptions extends SubscribeOptions {
+  /** Deliver only events about the dialog or panel hosting THIS page — the one whose
+   *  \`tdsDialogId\` is on the page's own URL. For a page running inside a
+   *  viewer dialog; elsewhere (no \`?tdsDialogId=\`) nothing is delivered. */
+  self?: boolean;
+}
+
+/** Options for \`onDialogClosing\`. */
+export interface DialogClosingOptions extends SubscribeOptions {
+  /** How long the viewer waits for your handlers before unmounting the page
+   *  anyway, in ms — default 3000, max 10000. */
+  timeoutMs?: number;
+}
+
+/** Every event {@link TredespaceClient.on} can subscribe to, with its payload.
+ *  The viewer posts all but the last two; \`client.closed\` and \`relay.changed\`
+ *  are raised by this client itself and never cross postMessage. */
+export interface TredespaceEventMap {
+  'app.ready': AppReady;
+  'app.bye': AppByeEvent;
+  'app.error': AppErrorEvent;
+  'theme.changed': { theme: 'dark' | 'light' };
+  'tree.select': TreeSelectEvent;
+  'instance.changed': { data: Record<string, unknown> };
+  'dialog.changed': DialogChangedEvent;
+  'viewpoints.bookmark': ViewpointsBookmarkEvent;
+  'assets.importUrl:progress': ImportUrlProgress;
+  'assets.load:progress': LoadProgress;
+  'sql.importUrl:progress': SqlImportProgress;
+  'sql.execute:progress': SqlExecuteProgress;
+  'sql.color:progress': { rows: number };
+  'sql.select:progress': { rows: number };
+  'sql.table:progress': { rows: number };
+  'custom.event': CustomEventPayload;
+  'custom.clients.changed': ClientsChangedEvent;
+  'client.closed': ClientClosedEvent;
+  'relay.changed': RelayChangedEvent;
+}
+
+/** Raised by this client, never posted by the viewer — \`on()\` does not ask
+ *  the viewer to send them. */
+const LOCAL_EVENTS: ReadonlySet<string> = new Set(['client.closed', 'relay.changed']);
+
+/** What {@link TredespaceClient.ready} and {@link TredespaceClient.once}
+ *  reject with: \`timeout\` (the wait ran out) or \`transport\` (the client
+ *  closed first). Command methods never throw — they resolve a
+ *  {@link Result}. */
+export class TredespaceClientError extends Error {
+  readonly code: 'timeout' | 'transport';
+  constructor(code: 'timeout' | 'transport', message: string) {
+    super(message);
+    this.name = 'TredespaceClientError';
+    this.code = code;
+  }
+}
+
+interface Pending {
+  settle: (r: Result<unknown>) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface ReadyWaiter {
+  resolve: (r: AppReady) => void;
+  reject: (e: TredespaceClientError) => void;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+interface RelayEntry {
+  win: Window;
+  origin: string;
+}
+
+/** A request forwarded for a relayed window, awaiting the viewer's result. */
+interface RelayedRequest extends RelayEntry {
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/** The wire shape shared by commands, results, events and the client-to-relay
+ *  \`client.hello\` / \`client.bye\` notes. */
+interface Envelope {
+  tredespace?: number;
+  id?: string | null;
+  type?: string;
+  ok?: boolean;
+  payload?: unknown;
+  error?: { code: TredespaceErrorCode; message: string };
+  bytes?: unknown;
+}
+
+/** Bytes to transfer with an envelope — its \`bytes\` when they are an
+ *  ArrayBuffer (a Blob rides by reference). */
+function transferablesOf(data: unknown): ArrayBuffer[] {
+  if (typeof data !== 'object' || data === null || !('bytes' in data)) {
+    return [];
+  }
+  const bytes: unknown = data.bytes;
+  return bytes instanceof ArrayBuffer ? [bytes] : [];
+}
+
+/** Window targets and relayed windows are checked for \`closed\` this often. */
+const CLOSED_POLL_MS = 1000;
+
+/** \`transport\` error text for requests pending when the client closes. */
+const CLOSE_MESSAGES: Record<ClientClosedEvent['reason'], string> = {
+  disposed: 'client disposed',
+  relay: 'relay ended by the opener',
+  target: 'target window closed',
+};
+
+/** Blob/File payloads at or above this size are streamed in chunks rather than
+ *  sent as one message, so a multi-GB import never allocates one huge buffer. */
+const CHUNKED_UPLOAD_THRESHOLD = 500 * 1024 * 1024;
+/** Per-chunk transfer size for large uploads. */
+const UPLOAD_CHUNK_SIZE = 64 * 1024 * 1024;
+
+/** \`postMessage\` accepts a full URL as targetOrigin and uses only its origin,
+ *  but \`event.origin\` on everything coming back is always the bare origin — so
+ *  a viewer proxied under a path (\`https://portal.example.com/tredespace\`) or
+ *  a trailing slash must not silently drop every reply. \`*\` passes through;
+ *  anything that is not a URL throws, as postMessage itself would. */
+function normalizeOrigin(value: string, what: string): string {
+  if (value === '*') {
+    return '*';
+  }
+  try {
+    return new URL(value).origin;
+  } catch {
+    throw new TypeError(\`\${what} must be an origin or URL, got \${JSON.stringify(value)}\`);
+  }
+}
+
+export class TredespaceClient {
+  private target: Window | null;
+  private readonly origin: string;
+  private readonly timeoutMs: number;
+  private readonly importTimeoutMs: number;
+  private readonly pending = new Map<string, Pending>();
+  private readonly eventHandlers = new Map<string, Set<(payload: unknown) => void>>();
+  // random per-instance prefix: several clients sharing one transport (e.g. a
+  // future BroadcastChannel) can never collide on correlation ids
+  private readonly idPrefix = \`ts-\${Math.random().toString(36).slice(2, 10)}\`;
+  private nextId = 1;
+  private readyPayload: AppReady | null = null;
+  private readyWaiters: ReadyWaiter[] = [];
+  /** Viewer event types this client listens for — what \`events.subscribe\`
+   *  asks the viewer to send, re-sent after every \`app.ready\`. */
+  private readonly wireTypes = new Set<string>();
+  private readonly waitForReady: boolean;
+  private readonly closingHandlers = new Set<(e: DialogChangedEvent) => unknown>();
+  private closingOff: (() => void) | null = null;
+  // windows this client relays for, keyed by the window so an incoming
+  // message's \`source\` finds its entry directly
+  private readonly relays = new Map<MessageEventSource, RelayEntry>();
+  private readonly relayed = new Map<string, RelayedRequest>();
+  // a Window target (opener, popup viewer, parent) is watched for \`closed\`;
+  // an iframe element is the host's DOM, which it disposes itself
+  private readonly watchTarget: boolean;
+  private watchTimer: ReturnType<typeof setInterval> | null = null;
+  private isClosed = false;
+  private readonly onMessage = (e: MessageEvent) => this.handle(e);
+  private readonly onPageHide = () => this.sayBye();
+  private readonly onPageShow = (e: PageTransitionEvent) => {
+    if (e.persisted) {
+      this.sayHello();
+    }
+  };
+
+  constructor(target: Window | HTMLIFrameElement, opts: TredespaceClientOptions) {
+    this.target = target instanceof HTMLIFrameElement ? target.contentWindow : target;
+    this.watchTarget = !(target instanceof HTMLIFrameElement);
+    this.origin = normalizeOrigin(opts.targetOrigin, 'targetOrigin');
+    this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.importTimeoutMs = opts.importTimeoutMs ?? 600_000;
+    this.waitForReady = opts.waitForReady ?? true;
+    window.addEventListener('message', this.onMessage);
+    window.addEventListener('pagehide', this.onPageHide);
+    window.addEventListener('pageshow', this.onPageShow);
+    if (opts.signal?.aborted) {
+      this.dispose();
+      return;
+    }
+    opts.signal?.addEventListener('abort', () => this.dispose(), { once: true });
+    if (this.watchTarget) {
+      this.startWatch();
+    }
+    this.sayHello();
+  }
+
+  /** Resolves once the viewer has announced app.ready (queues until then).
+   *  With \`timeoutMs\` it rejects — a {@link TredespaceClientError}, code
+   *  \`timeout\` — when no app.ready arrives in time: the viewer is not there,
+   *  or this page's origin is not on its allowlist (which it never reports).
+   *  It also rejects (code \`transport\`) when the client is disposed or its
+   *  target window closes before ready. Without a timeout it waits for as
+   *  long as the client lives. */
+  ready(opts: { timeoutMs?: number } = {}): Promise<AppReady> {
+    if (this.readyPayload) {
+      return Promise.resolve(this.readyPayload);
+    }
+    if (this.isClosed) {
+      return Promise.reject(new TredespaceClientError('transport', 'client closed before app.ready'));
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: ReadyWaiter = { resolve, reject, timer: null };
+      if (opts.timeoutMs !== undefined) {
+        waiter.timer = setTimeout(() => {
+          this.readyWaiters = this.readyWaiters.filter((w) => w !== waiter);
+          reject(new TredespaceClientError('timeout', \`app.ready did not arrive within \${opts.timeoutMs} ms\`));
+        }, opts.timeoutMs);
+      }
+      this.readyWaiters.push(waiter);
+    });
+  }
+
+  /** Whether this viewer has a command (\`'sql.execute'\`) or posts an event
+   *  (\`'tree.select'\`), from the \`app.ready\` payload — so \`false\` until
+   *  {@link ready} has resolved. Feature-detect before calling something a
+   *  newer viewer added; an unsupported command answers \`unknown-command\`. */
+  supports(name: string): boolean {
+    const r = this.readyPayload;
+    if (!r) {
+      return false;
+    }
+    return (
+      (Array.isArray(r.commands) && r.commands.includes(name)) || (Array.isArray(r.events) && r.events.includes(name))
+    );
+  }
+
+  /** The \`app.ready\` payload on demand: version, protocol, the command and
+   *  event lists and the CURRENT GPU state (\`app.ready\` itself usually says
+   *  \`booting\`, this says how the viewport boot went). */
+  appInfo(): Promise<Result<AppReady>> {
+    return this.send('app.info', {});
+  }
+
+  /** Tell the viewer which events to send this client. {@link on} does this
+   *  for you, so call it only from a hand-rolled event path. Adds to the
+   *  current subscription: the first call turns "everything" into "exactly
+   *  these" (\`[]\` keeps only \`app.*\`, which always arrives). Unknown names
+   *  come back in \`unknown\`, not as an error. */
+  eventsSubscribe(events: string[]): Promise<Result<{ events: string[]; unknown: string[] }>> {
+    for (const e of events) {
+      if (!LOCAL_EVENTS.has(e)) {
+        this.wireTypes.add(e);
+      }
+    }
+    return this.send('events.subscribe', { events });
+  }
+
+  /** Detach the message listener and settle every in-flight request with a
+   *  \`transport\` error. Call when the host tears down the iframe. Ends every
+   *  relay this client runs (their windows' clients close with reason
+   *  \`relay\`) and raises the local \`client.closed\` event with reason
+   *  \`disposed\`. */
+  dispose() {
+    this.close('disposed');
+  }
+
+  /** Forward the postMessage API for a window this page opened (\`window.open\`)
+   *  — its page drives THIS page with an unchanged client
+   *  (\`new TredespaceClient(window.opener, { targetOrigin })\`) and every
+   *  command, result, event and \`app.ready\` passes through here to the
+   *  viewer and back. Bytes are re-transferred, everything else is
+   *  structured-cloned once more per hop. The window gets exactly this
+   *  client's API rights, so \`origin\` is mandatory and never \`'*'\`. Works
+   *  the same from a page inside the viewer (its client targets
+   *  \`window.parent\`), and a relayed window's client can relay again to
+   *  windows it opens. Returns a function that ends the relay (so does
+   *  \`{ signal }\` and \`dispose()\`), which closes the window's client; a
+   *  window that closes drops its relay by itself. Watch it with
+   *  \`onRelayChanged\`. */
+  relay(win: Window, opts: RelayOptions): () => void {
+    if (!opts.origin || opts.origin === '*') {
+      throw new TypeError('relay(): origin must be the relayed window\\'s concrete origin, never "*"');
+    }
+    const origin = normalizeOrigin(opts.origin, 'relay(): origin');
+    if (this.isClosed || opts.signal?.aborted) {
+      return () => undefined;
+    }
+    this.relays.set(win, { win, origin });
+    this.startWatch();
+    if (this.readyPayload) {
+      this.post(win, origin, this.readyEnvelope());
+    }
+    const off = () => this.endRelay(win, null);
+    opts.signal?.addEventListener('abort', off, { once: true });
+    return off;
+  }
+
+  // ── commands (one method per EVENTS.md entry) ─────────────────────────────
+
+  /** Replace the selection by fullname (reveals the first hit in the tree).
+   *  A name resolves in EVERY loaded model that carries it — the same
+   *  structure loaded twice selects both copies, as colouring the same list
+   *  would — so \`matched\` counts selected entries and can exceed the number of
+   *  names sent. \`append: true\` keeps what is already selected and adds to it
+   *  instead. \`missed\` lists fullnames that resolved to nothing. */
+  selectionSet(fullnames: string[], opts?: { append?: boolean }): Promise<Result<SelectionSetResult>> {
+    return this.send('selection.set', { fullnames, append: opts?.append ?? false });
+  }
+  /** Select a LARGE fullname list: build it with {@link encodeNameList} and
+   *  it travels as one transferred buffer, packed straight into the model DB —
+   *  no per-row JSON on either side. \`append\` adds to the current selection.
+   *  As with {@link selectionSet}, a name resolves in every loaded model that
+   *  carries it, so \`matched\` counts entries and \`missed\` counts names that
+   *  resolved nowhere. For a handful of names {@link selectionSet} is
+   *  simpler. */
+  selectionSetList(list: ArrayBuffer, opts?: { append?: boolean }): Promise<Result<SelectionListResult>> {
+    return this.send(
+      'selection.setList',
+      { append: opts?.append ?? false },
+      { bytes: list, timeoutMs: this.importTimeoutMs },
+    );
+  }
+  /** Clear the current selection. */
+  selectionClear(): Promise<Result<Record<string, never>>> {
+    return this.send('selection.clear', {});
+  }
+  /** Read the current selection: the count, the selection roots as
+   *  fullnames, and with \`{ items: true }\` every selected node — grouping
+   *  entries and leaves, children included, minus \`skip\` prefixes, capped at
+   *  \`maxItems\` — the form to use after invert / API / SQL selections, which
+   *  have no tree roots. \`{ parents: true }\` adds every ancestor of the
+   *  selection, each fullname once, so a host can resolve tags carried by a
+   *  level above what was selected. */
+  selectionGet(opts: SelectionGetOptions = {}): Promise<Result<SelectionGetResult>> {
+    return this.send('selection.get', { ...opts });
+  }
+
+  /** Replace all scene labels. Each label anchors either to a world-space
+   *  \`anchor\` point or to a \`fullname\` (the item's bounds centre, or the
+   *  nearest child item with \`snap: true\`); \`missed\` lists fullnames that
+   *  resolved to nothing. Colours (\`bg\`, \`textColor\`, \`leaderColor\`),
+   *  \`opacity\` and the leader-line \`offset\` are per label — each omitted one
+   *  falls back to the Labels panel's current style. */
+  labelsSet(labels: LabelInput[]): Promise<Result<LabelsResult>> {
+    return this.send('labels.set', { labels });
+  }
+  /** Append scene labels (same anchor forms as {@link labelsSet}). */
+  labelsAdd(labels: LabelInput[]): Promise<Result<LabelsResult>> {
+    return this.send('labels.add', { labels });
+  }
+  /** Remove every scene label. */
+  labelsClear(): Promise<Result<Record<string, never>>> {
+    return this.send('labels.clear', {});
+  }
+
+  /** Every scene label as the Labels panel holds it — the {@link labelsSet}
+   *  fields plus id, style, the dragged offset and the sphere marker — so a
+   *  host can store and later restore or diff them. */
+  labelsGet(): Promise<Result<{ labels: LabelInfo[] }>> {
+    return this.send('labels.get', {});
+  }
+  /** Spread overlapping labels apart from their anchors (the in-app explode). */
+  labelsExplode(): Promise<Result<Record<string, never>>> {
+    return this.send('labels.explode', {});
+  }
+  /** Pull exploded labels back onto their anchor points. */
+  labelsImplode(): Promise<Result<Record<string, never>>> {
+    return this.send('labels.implode', {});
+  }
+
+  /** Replace all measurements (world-space points; same shape as the
+   *  measurements JSON export). */
+  measurementsSet(measurements: MeasurementInput[]): Promise<Result<{ added: number }>> {
+    return this.send('measurements.set', { measurements });
+  }
+  /** Append measurements (same shape as {@link measurementsSet}). */
+  measurementsAdd(measurements: MeasurementInput[]): Promise<Result<{ added: number }>> {
+    return this.send('measurements.add', { measurements });
+  }
+  /** Remove every measurement. */
+  measurementsClear(): Promise<Result<Record<string, never>>> {
+    return this.send('measurements.clear', {});
+  }
+
+  /** Run a rule set DIRECTLY, without touching the Set Color panel — same
+   *  rule shape as {@link colorRulesSet}, but the panel's own rules/mode stay
+   *  as they are (nothing to clean up afterwards). \`mode\` defaults to
+   *  'reset'; disabled rules are skipped. Returns per-enabled-rule match
+   *  counts. */
+  colorRulesApply(
+    rules: ColorRuleInput[],
+    opts?: { mode?: 'reset' | 'append' | 'hide' },
+  ): Promise<Result<{ ran: boolean; matches: number[] }>> {
+    return this.send('colorRules.apply', { rules, mode: opts?.mode ?? 'reset' });
+  }
+  /** Replace the Set-Color rules — or, with \`replaceRules:false\`, append to
+   *  the ones already there (like {@link colorRulesAdd}). \`mode\` is the run
+   *  mode the panel keeps: 'reset' (default) clears existing overrides before
+   *  painting, 'append' layers on top, 'hide' hides everything the rules do
+   *  not match, and 'keep' leaves whatever the panel has (a fresh panel's is
+   *  'reset') — so \`{ replaceRules: false, mode: 'keep' }\` adds rules without
+   *  disturbing a user's own set-up. \`run:true\` applies them immediately. */
+  colorRulesSet(
+    rules: ColorRuleInput[],
+    opts?: { mode?: 'reset' | 'append' | 'hide' | 'keep'; run?: boolean; replaceRules?: boolean },
+  ): Promise<Result<ColorRulesResult>> {
+    return this.send('colorRules.set', {
+      rules,
+      mode: opts?.mode ?? 'reset',
+      run: opts?.run ?? false,
+      replaceRules: opts?.replaceRules ?? true,
+    });
+  }
+  /** Append Set-Color rules; \`run:true\` applies them immediately. */
+  colorRulesAdd(rules: ColorRuleInput[], opts?: { run?: boolean }): Promise<Result<ColorRulesResult>> {
+    return this.send('colorRules.add', { rules, run: opts?.run ?? false });
+  }
+  /** Colour a LARGE fullname list you computed yourself: build it with
+   *  {@link encodeNameList} (per-name colours optional) and it travels as one
+   *  transferred buffer, packed viewer-side. \`mode\` is the same
+   *  {@link ColorMode} {@link sqlColor} takes — including
+   *  \`{ type: 'custom-color', base: 'none' }\` to paint the list over the model
+   *  as it is. Names carrying no colour of their own get the mode's colour
+   *  (yellow by default). */
+  colorRulesApplyList(
+    list: ArrayBuffer,
+    opts?: { mode?: ColorMode },
+  ): Promise<Result<NameListResult & { mode: string }>> {
+    return this.send(
+      'colorRules.applyList',
+      { mode: opts?.mode ?? { type: 'default-white' } },
+      { bytes: list, timeoutMs: this.importTimeoutMs },
+    );
+  }
+  /** The old name of {@link colorRulesApplyList} — same call, kept so existing
+   *  hosts keep working.
+   *  @deprecated Renamed {@link colorRulesApplyList}, which mirrors the command
+   *  name like every other method. */
+  colorApplyList(list: ArrayBuffer, opts?: { mode?: ColorMode }): Promise<Result<NameListResult & { mode: string }>> {
+    return this.colorRulesApplyList(list, opts);
+  }
+  /** Every colour NAME the viewer accepts wherever a colour token is read — a
+   *  query's \`fullname_color\`, a Multi rule row, a {@link ColorMode}'s
+   *  \`color\` — as \`{ name: '#rrggbb' }\`. Hex codes always work too; this is
+   *  the list for validating or offering names in your own UI. */
+  colorsNames(): Promise<Result<{ names: Record<string, string> }>> {
+    return this.send('colors.names', {});
+  }
+  /** Re-run the current rules against the model; returns matched item counts. */
+  colorRulesRun(): Promise<Result<{ matches: number[] }>> {
+    return this.send('colorRules.run', {});
+  }
+  /** Remove all Set-Color rules. Does NOT restore already-painted colors — use
+   *  {@link colorRulesResetModel} for that. */
+  colorRulesClear(): Promise<Result<Record<string, never>>> {
+    return this.send('colorRules.clear', {});
+  }
+  /** Reset the model's color/opacity overrides (the in-app Alt+R action). */
+  colorRulesResetModel(): Promise<Result<Record<string, never>>> {
+    return this.send('colorRules.resetModel', {});
+  }
+  /** Reset the model's overrides — colors, opacity overrides, hidden items and
+   *  item transforms. Naming kinds resets ONLY those (\`{ hidden: true }\`
+   *  unhides and leaves the colors alone); an empty payload resets all four.
+   *  The response echoes which kinds were reset. */
+  modelReset(opts?: ModelResetOptions): Promise<Result<ModelResetResult>> {
+    return this.send('model.reset', { ...opts });
+  }
+
+  // ── clipping box + shapes ─────────────────────────────────────────────────
+  /** The default clipping box: whether it is cutting, whether it is inverted,
+   *  its world-space \`min\`/\`max\` (axis-aligned envelope — exact unless the box
+   *  is rotated) plus the exact oriented box. Intersect \`min\`/\`max\` with your
+   *  own asset bounds to decide which models to load. */
+  clipBoxGet(): Promise<Result<ClipBoxState>> {
+    return this.send('clip.box.get', {});
+  }
+  /** Fit the clip box to the current selection. \`offset\` adds a margin on every
+   *  side for THIS call only (it doesn't change the panel's stored offset). */
+  clipBoxFitSelected(offset?: number): Promise<Result<{ offset: number }>> {
+    return this.send('clip.box.fitSelected', offset === undefined ? {} : { offset });
+  }
+  /** Append clip shapes (sphere/cylinder/box). Returns how many were added. */
+  clipShapesAdd(shapes: ClipShapeInput[]): Promise<Result<{ added: number }>> {
+    return this.send('clip.shapes.add', { shapes });
+  }
+  /** Turn box clipping off (leaves any clip shapes in place). */
+  clipBoxDisable(): Promise<Result<Record<string, never>>> {
+    return this.send('clip.box.disable', {});
+  }
+  /** Full clip reset — disable the box AND remove every clip shape. */
+  clipReset(): Promise<Result<Record<string, never>>> {
+    return this.send('clip.reset', {});
+  }
+
+  // ── navigation ────────────────────────────────────────────────────────────
+  /** Fly the camera to a node by fullname. \`select\` also selects it (default
+   *  just flies); \`wait\` responds only once the camera has ARRIVED, so a
+   *  chained screenshot or command sees the final view. A name carried by
+   *  several loaded models frames EVERY copy — the camera pulls back far
+   *  enough to hold them all, like fit-selected on a multi-model selection.
+   *  \`matched\` is false when the fullname isn't found. */
+  navFlyTo(fullname: string, opts?: { select?: boolean; wait?: boolean }): Promise<Result<{ matched: boolean }>> {
+    return this.send('nav.flyTo', { fullname, select: opts?.select ?? false, wait: opts?.wait ?? false });
+  }
+  /** Set the orbit pivot to a node by fullname (camera stays); \`select\` also
+   *  selects it, \`wait\` responds only once the re-pivot has landed. A name
+   *  carried by several loaded models pivots on the centre of all copies
+   *  together, as {@link navFlyTo} frames them all. \`matched\` is false when the
+   *  fullname isn't found. */
+  navOrbit(fullname: string, opts?: { select?: boolean; wait?: boolean }): Promise<Result<{ matched: boolean }>> {
+    return this.send('nav.orbit', { fullname, select: opts?.select ?? false, wait: opts?.wait ?? false });
+  }
+  /** Frame everything currently VISIBLE — every item that is not hidden (a
+   *  leftover opacity-0 override counts as hidden too), moved geometry
+   *  included —
+   *  as tightly as the viewport allows, under the
+   *  clipping in force: with the clip box / shapes on, the frame is the
+   *  visible box cut down to their envelope (holes ignored), and every
+   *  enabled clipping plane trims it. \`bounds: 'bbox'\` frames the clip
+   *  volumes' envelope itself instead. \`wait\` responds only once the camera
+   *  has arrived. \`fitted\` is false when nothing visible is left to frame. */
+  navFitVisible(opts?: { wait?: boolean; bounds?: FitVisibleBounds }): Promise<Result<{ fitted: boolean }>> {
+    return this.send('nav.fitVisible', {
+      wait: opts?.wait ?? false,
+      ...(opts?.bounds ? { bounds: opts.bounds } : {}),
+    });
+  }
+
+  /** Read-only snapshot of the persisted viewer settings, plus the app version. */
+  settingsGet(): Promise<Result<SettingsGetResult>> {
+    return this.send('settings.get', {});
+  }
+
+  /** Set Settings → Rendering (antialiasing, culling, picking, VRAM budget,
+   *  background & selection, outline, transparency, dark colours, debug).
+   *  Any subset of {@link RenderingSettings}; unknown keys and wrong types
+   *  are rejected as \`bad-payload\`. Persists exactly like an edit in the
+   *  panel — so send company defaults once (after \`ready()\`), not on every
+   *  load, or the user's own tweaks are overwritten each time. \`reset: true\`
+   *  returns the tab to defaults before the subset applies; an empty call
+   *  only reads. Resolves to the tab's values after the change. */
+  settingsRenderingSet(patch: SettingsPatch<RenderingSettings> = {}): Promise<Result<RenderingSettings>> {
+    return this.send('settings.rendering.set', { ...patch });
+  }
+
+  /** Set Settings → Lighting (ambient + headlight, and sketch mode's own
+   *  pair) — any subset of {@link LightingSettings}, same rules as
+   *  {@link TredespaceClient.settingsRenderingSet}. */
+  settingsLightingSet(patch: SettingsPatch<LightingSettings> = {}): Promise<Result<LightingSettings>> {
+    return this.send('settings.lighting.set', { ...patch });
+  }
+
+  /** Set Settings → Edges (common switches, flat and authored-normal tuning,
+   *  sketch edges + sketch cube colours) — any subset of
+   *  {@link EdgesSettings}, same rules as
+   *  {@link TredespaceClient.settingsRenderingSet}. */
+  settingsEdgesSet(patch: SettingsPatch<EdgesSettings> = {}): Promise<Result<EdgesSettings>> {
+    return this.send('settings.edges.set', { ...patch });
+  }
+
+  /** Set Settings → Ambient Occlusion — any subset of {@link AoSettings},
+   *  same rules as {@link TredespaceClient.settingsRenderingSet}. */
+  settingsAoSet(patch: SettingsPatch<AoSettings> = {}): Promise<Result<AoSettings>> {
+    return this.send('settings.ao.set', { ...patch });
+  }
+
+  /** Set Settings → Gizmo: the view cube's colours and/or its face names
+   *  (\`labels\` takes any subset of the six faces; an empty name restores
+   *  that face's default, names are cut to 5 characters). Same rules as
+   *  {@link TredespaceClient.settingsRenderingSet}. */
+  settingsGizmoSet(
+    patch: Partial<Omit<GizmoSettings, 'labels'>> & { labels?: Partial<GizmoLabels>; reset?: boolean } = {},
+  ): Promise<Result<GizmoSettings>> {
+    return this.send('settings.gizmo.set', { ...patch });
+  }
+
+  /** What the viewer is rendering on: the active adapter, what the three
+   *  adapter hints resolve to (WebGPU cannot list GPUs, but a machine whose
+   *  high-performance and low-power hints resolve to different adapters has
+   *  two — \`hasMultipleGpus\`), the optional features it got, the draw path,
+   *  the adapter's limits and the VRAM budget it would suggest. On Linux
+   *  Chrome usually exposes only the GPU its GPU process runs on, so both
+   *  hints resolve to the same adapter there even on dual-GPU laptops. */
+  gpuInfoGet(): Promise<Result<GpuInfo>> {
+    return this.send('gpu.info.get', {});
+  }
+
+  /** Toggle sketch mode (white background + edge lines), or set it explicitly
+   *  by passing \`on\`. Returns the resulting state. */
+  viewSketch(on?: boolean): Promise<Result<{ sketch: boolean }>> {
+    return this.send('view.sketch', on === undefined ? {} : { on });
+  }
+
+  /** Capture the current viewport as a PNG — the converged frame (edges, AA,
+   *  AO, view cube) plus the label and measurement overlays, exactly as shown.
+   *  The bytes arrive TRANSFERRED (zero copy, no base64), so wrap them for
+   *  display: \`URL.createObjectURL(new Blob([bytes], { type: mime }))\`. Pass
+   *  \`{ dataUrl: true }\` for the \`data:image/png;base64,…\` string instead —
+   *  handy as an \`<img>\` src, but a third larger and copied through a JS
+   *  string on both sides. */
+  viewScreenshot(opts?: { dataUrl?: false }): Promise<Result<ScreenshotBytes>>;
+  viewScreenshot(opts: { dataUrl: true }): Promise<Result<ScreenshotDataUrl>>;
+  viewScreenshot(opts?: { dataUrl?: boolean }): Promise<Result<ScreenshotBytes | ScreenshotDataUrl>> {
+    return this.send('view.screenshot', opts?.dataUrl ? { dataUrl: true } : {});
+  }
+
+  /** List the stores (projects). Fetch this first to know valid \`store\` names
+   *  for assetsList / assetsLoad / assetsImport. */
+  storesList(): Promise<Result<{ stores: StoreInfo[] }>> {
+    return this.send('stores.list', {});
+  }
+
+  /** Create a store (project) with an optional description. Idempotent — an
+   *  existing name (or 'main') resolves with \`created:false\` and the current
+   *  store, so it is safe to call before targeting a store you're not sure
+   *  exists. The name is sanitised (slashes → '-', trimmed, capped at 60). */
+  storesCreate(name: string, opts?: { description?: string }): Promise<Result<{ created: boolean; store: StoreInfo }>> {
+    return this.send('stores.create', { name, description: opts?.description ?? '' });
+  }
+
+  /** List assets. Pass \`store\` to list just that store (must be a known name). */
+  assetsList(store?: string): Promise<Result<{ assets: AssetInfo[] }>> {
+    return this.send('assets.list', store === undefined ? {} : { store });
+  }
+
+  /** Send a file for conversion into the asset manager.
+   *
+   *  \`bytes\` may be an ArrayBuffer (TRANSFERRED - unusable in the host after) or
+   *  a Blob/File (passed by reference, not detached). A Blob/File at or above
+   *  500 MB is automatically streamed in 64 MB chunks (many small postMessages,
+   *  reassembled in the viewer) so multi-GB files import without ever allocating
+   *  one huge buffer. Everything is plain postMessage - cross-origin safe.
+   *
+   *  Import does NOT render - call \`assetsLoad\` afterwards, or use
+   *  \`assetsImportAndLoad\`. \`onProgress\` (0..1) fires per chunk for large files. */
+  assetsImport(input: {
+    fileName: string;
+    format: ImportFormat;
+    bytes: ArrayBuffer | Blob;
+    folder?: string;
+    /** destination store (default 'main'); must be a known store name */
+    store?: string;
+    /** delete any prior asset sharing this one's store + folder + name */
+    replace?: boolean;
+    /** per-format options, e.g. { normals: true, edges: true } for glb-standard */
+    options?: Record<string, unknown>;
+    /** metadata stored with the produced asset(s), returned by \`assetsList\` */
+    meta?: Record<string, unknown>;
+    /** upload progress (0..1); only fires for chunk-streamed large files */
+    onProgress?: (fraction: number) => void;
+  }): Promise<Result<AssetsImportResult>> {
+    const { bytes, onProgress, ...payload } = input;
+    const size = bytes instanceof Blob ? bytes.size : bytes.byteLength;
+    if (bytes instanceof Blob && size >= CHUNKED_UPLOAD_THRESHOLD) {
+      return this.chunkedImport(bytes, payload, onProgress);
+    }
+    // Small Blob/File: read it HERE (the host) and transfer the ArrayBuffer.
+    // The viewer must not read a picked File across postMessage - the file
+    // reference doesn't survive the boundary and throws NotReadableError.
+    if (bytes instanceof Blob) {
+      return bytes
+        .arrayBuffer()
+        .then((buf) =>
+          this.send<AssetsImportResult>('assets.import', payload, { bytes: buf, timeoutMs: this.importTimeoutMs }),
+        );
+    }
+    return this.send<AssetsImportResult>('assets.import', payload, { bytes, timeoutMs: this.importTimeoutMs });
+  }
+
+  /** Import then immediately load the produced assets - the "import a sample and
+   *  show it" flow. Returns the import result plus how many were loaded. */
+  async assetsImportAndLoad(
+    input: Parameters<TredespaceClient['assetsImport']>[0] & {
+      fit?: boolean;
+      /** place the camera instead of fitting — see \`assetsLoad\` */
+      camera?: CameraInput;
+      cameraFirst?: boolean;
+    },
+  ): Promise<Result<AssetsImportResult & { loaded: number }>> {
+    const { fit, camera, cameraFirst, ...imp } = input;
+    const res = await this.assetsImport(imp);
+    if (res.error) {
+      return { error: res.error };
+    }
+    const data = res.data as AssetsImportResult;
+    const ids = data.entries.map((e) => e.id);
+    let loaded = 0;
+    if (ids.length) {
+      const lr = await this.assetsLoad(ids, {
+        fit: fit ?? true,
+        ...(input.store ? { store: input.store } : {}),
+        ...(camera ? { camera } : {}),
+        ...(cameraFirst !== undefined ? { cameraFirst } : {}),
+      });
+      if (lr.error) {
+        return { error: lr.error };
+      }
+      loaded = (lr.data as { loaded: number }).loaded;
+    }
+    return { data: { ...data, loaded } };
+  }
+
+  /** Batch-import files the VIEWER downloads by URL - nothing rides
+   *  postMessage, so a host can queue many/large models without shipping their
+   *  bytes across the frame. Each file names its own \`format\` (required - a
+   *  \`.glb\` URL is ambiguous between merged and standard, so nothing is
+   *  inferred on the wire).
+   *
+   *  \`concurrent\` (default 3, clamped 1..8) files are processed at once
+   *  END-TO-END: for glb/tdp each slot downloads AND cooks, so a slow download
+   *  never stalls a cook that is ready to run. The rvm/ifc/step converters are
+   *  multi-phase and stage through shared temp dirs, so they run one after
+   *  another (their downloads still stream inside the same batch).
+   *
+   *  Passing \`onProgress\` also puts the viewer in QUIET mode: it drives no
+   *  import dialogs at all, leaving the progress UI entirely to the host.
+   *  Ticks carry the file \`index\`, its phase, and downloaded bytes - see
+   *  {@link ImportUrlProgress}. Without \`onProgress\` the viewer shows its own
+   *  import overlay as usual.
+   *
+   *  One \`results\` entry per input file, in input order; a download or convert
+   *  failure is recorded there and never aborts the batch. URLs are fetched
+   *  under the VIEWER origin's CORS, not the host's. */
+  assetsImportUrl(
+    files: ImportUrlFile[],
+    opts?: {
+      /** files processed at once — download AND cook (default 3, clamped 1..8
+       *  by the viewer). */
+      concurrent?: number;
+      /** destination store (default 'main'); must be a known store name. */
+      store?: string;
+      /** delete any prior asset sharing each new one's store + folder + name. */
+      replace?: boolean;
+      /** per-file progress; also suppresses the viewer's own import dialogs. */
+      onProgress?: (p: ImportUrlProgress) => void;
+      /** Abort the batch: the viewer stops its downloads and starts no more
+       *  files (whatever already landed stays imported). Resolves \`cancelled\`. */
+      signal?: AbortSignal;
+    },
+  ): Promise<Result<AssetsImportUrlResult>> {
+    const batchId = \`\${this.idPrefix}-batch-\${this.nextId++}\`;
+    const off = opts?.onProgress
+      ? this.on('assets.importUrl:progress', (p) => {
+          const pr = p as ImportUrlProgress & { batchId?: string };
+          if (pr.batchId === batchId) {
+            opts.onProgress?.(pr);
+          }
+        })
+      : undefined;
+    // one file can be a long cook; give the whole batch room beyond one import.
+    const timeoutMs = this.importTimeoutMs * Math.max(1, files.length);
+    return this.send<AssetsImportUrlResult>(
+      'assets.importUrl',
+      {
+        files,
+        batchId,
+        // tells the viewer the host draws its own progress UI: no app dialogs
+        ...(opts?.onProgress ? { progress: true } : {}),
+        ...(opts?.concurrent !== undefined ? { concurrent: opts.concurrent } : {}),
+        ...(opts?.store ? { store: opts.store } : {}),
+        ...(opts?.replace ? { replace: opts.replace } : {}),
+      },
+      { timeoutMs, ...(opts?.signal ? { signal: opts.signal } : {}) },
+    ).finally(() => off?.());
+  }
+
+  /** Stream a large Blob/File to the viewer in chunks, then import it. Used
+   *  automatically by \`assetsImport\` for payloads >= the threshold. */
+  private async chunkedImport(
+    blob: Blob,
+    payload: {
+      fileName: string;
+      format: ImportFormat;
+      folder?: string;
+      store?: string;
+      replace?: boolean;
+      options?: Record<string, unknown>;
+    },
+    onProgress?: (fraction: number) => void,
+  ): Promise<Result<AssetsImportResult>> {
+    const begin = await this.send<{ uploadId: string }>(
+      'assets.uploadBegin',
+      { fileName: payload.fileName, size: blob.size },
+      { timeoutMs: this.importTimeoutMs },
+    );
+    if (begin.error) {
+      return { error: begin.error };
+    }
+    const { uploadId } = begin.data as { uploadId: string };
+    const total = blob.size;
+    for (let offset = 0; offset < total; offset += UPLOAD_CHUNK_SIZE) {
+      const end = Math.min(offset + UPLOAD_CHUNK_SIZE, total);
+      // only one chunk is in memory at a time; its ArrayBuffer is transferred
+      const buf = await blob.slice(offset, end).arrayBuffer();
+      const chunk = await this.send(
+        'assets.uploadChunk',
+        { uploadId, offset },
+        { bytes: buf, timeoutMs: this.importTimeoutMs },
+      );
+      if (chunk.error) {
+        await this.send('assets.uploadAbort', { uploadId }); // best-effort cleanup
+        return { error: chunk.error };
+      }
+      onProgress?.(end / total);
+    }
+    return this.send<AssetsImportResult>(
+      'assets.uploadFinish',
+      { uploadId, ...payload },
+      { timeoutMs: this.importTimeoutMs },
+    );
+  }
+
+  /** Render imported assets into the viewer. The camera follows one of three
+   *  rules: \`fit: true\` (the default) frames what was loaded; \`fit: false\`
+   *  leaves the camera exactly where it is; a \`camera\` places it explicitly
+   *  and replaces the framing entirely, so the view never fits first and then
+   *  jumps. Pair with {@link assetsImport}, or use {@link assetsImportAndLoad}.
+   *
+   *  Models load in parallel (\`concurrent\`, default the viewer's load-pool
+   *  setting). Pass \`onProgress\` for a tick per model as it lands — that also
+   *  puts the viewer in quiet mode, so it drives no loading overlay and the
+   *  progress UI is entirely yours. Without it the viewer shows its own
+   *  overlay, exactly like loading from the Model Assets panel. */
+  assetsLoad(
+    ids: string[],
+    opts?: {
+      fit?: boolean;
+      store?: string;
+      camera?: CameraInput;
+      /** With a \`camera\`: move BEFORE the models load (default true — the
+       *  move is awaited, so the view has arrived as they appear) or after
+       *  (\`false\`). */
+      cameraFirst?: boolean;
+      concurrent?: number;
+      onProgress?: LoadProgressFn;
+    },
+  ): Promise<Result<{ loaded: number }>> {
+    return this.loadCall('assets.load', { ids, fit: opts?.fit ?? true }, opts);
+  }
+  /** Remove assets from the viewport (they stay in the asset manager). An
+   *  unload forgets the models' per-item state — colors, opacity, hidden
+   *  items, transforms — so loading them again starts clean; keep a look on
+   *  purpose with a state snapshot. */
+  assetsUnload(ids: string[]): Promise<Result<{ unloaded: number }>> {
+    return this.send('assets.unload', { ids });
+  }
+
+  /** Declaratively set WHICH assets are loaded: after this call the loaded
+   *  set is exactly \`ids\` — anything loaded but not listed is unloaded,
+   *  anything listed but not yet loaded is loaded, anything already right is
+   *  untouched (idempotent, so a sync can call it every cycle). An empty
+   *  array unloads everything. \`store\` scopes both directions to that store —
+   *  assets in other stores are never touched. \`fit\` is OPT-IN here (a
+   *  background sync should not move the camera) and frames the union of the
+   *  whole desired set, not just what this call loaded. \`missing\` returns
+   *  requested ids that are not in the asset manager — import those first.
+   *  Unloading forgets a model's per-item state (colors, opacity, hidden
+   *  items, transforms), so a later load starts clean. */
+  assetsSetLoaded(
+    ids: string[],
+    opts?: {
+      store?: string;
+      fit?: boolean;
+      camera?: CameraInput;
+      /** With a \`camera\`: move BEFORE the loads (default true) or after (\`false\`). */
+      cameraFirst?: boolean;
+      concurrent?: number;
+      onProgress?: LoadProgressFn;
+    },
+  ): Promise<Result<{ loaded: number; unloaded: number; missing: string[] }>> {
+    return this.loadCall('assets.setLoaded', { ids, ...(opts?.fit !== undefined ? { fit: opts.fit } : {}) }, opts);
+  }
+
+  /** Shared plumbing for the two load commands: subscribes to this batch's
+   *  progress ticks while it runs and tells the viewer to keep its own
+   *  overlay down whenever the host is drawing one. */
+  private loadCall<T>(
+    type: string,
+    payload: Record<string, unknown>,
+    opts?: {
+      store?: string;
+      camera?: CameraInput;
+      cameraFirst?: boolean;
+      concurrent?: number;
+      onProgress?: LoadProgressFn;
+    },
+  ): Promise<Result<T>> {
+    const batchId = \`\${this.idPrefix}-load-\${this.nextId++}\`;
+    const off = opts?.onProgress
+      ? this.on('assets.load:progress', (p) => {
+          const pr = p as LoadProgress & { batchId?: string };
+          if (pr.batchId === batchId) {
+            opts.onProgress?.(pr);
+          }
+        })
+      : undefined;
+    return this.send<T>(type, {
+      ...payload,
+      batchId,
+      ...(opts?.onProgress ? { progress: true } : {}),
+      ...(opts?.store ? { store: opts.store } : {}),
+      ...(opts?.camera ? { camera: opts.camera } : {}),
+      ...(opts?.cameraFirst !== undefined ? { cameraFirst: opts.cameraFirst } : {}),
+      ...(opts?.concurrent !== undefined ? { concurrent: opts.concurrent } : {}),
+    }).finally(() => off?.());
+  }
+
+  /** Delete persisted assets from local storage (OPFS). A copy already loaded
+   *  into the viewer stays on screen - import -> load -> remove leaves a
+   *  session-only model with nothing on disk. */
+  assetsRemove(ids: string[], opts?: { store?: string }): Promise<Result<{ removed: number }>> {
+    return this.send('assets.remove', { ids, ...(opts?.store ? { store: opts.store } : {}) });
+  }
+
+  // ── SQL databases (SQLite in OPFS, stores shared with model assets) ───────
+  /** List SQLite databases. Pass \`store\` to list just that store (a known
+   *  name). Each db's \`path\` is what you pass as \`mainDb\` to \`sqlQuery\`. */
+  sqlList(store?: string): Promise<Result<{ dbs: SqlDbInfo[] }>> {
+    return this.send('sql.list', store === undefined ? {} : { store });
+  }
+
+  /** Import a .db/.sqlite file into a store (default 'main'). \`bytes\` is an
+   *  ArrayBuffer (TRANSFERRED — unusable after) or a Blob/File (by reference).
+   *  \`replace: true\` overwrites an existing same-name db; false (default) skips
+   *  it. WAL databases are normalised to rollback journalling on the way in
+   *  (the OPFS VFS is shm-less, so WAL can't be read shared). The md5 of the
+   *  bytes as delivered is recorded and returned by \`sqlList\` — hash your
+   *  source file and compare to decide whether an import is needed at all. */
+  sqlImport(input: {
+    fileName: string;
+    bytes: ArrayBuffer | Blob;
+    /** destination store (default 'main'); must be a known store name */
+    store?: string;
+    replace?: boolean;
+    /** metadata stored with the database, returned by \`sqlList\` */
+    meta?: Record<string, unknown>;
+    /** per-phase progress; also silences the viewer's own dialogs */
+    onProgress?: (p: SqlImportProgress) => void;
+  }): Promise<Result<SqlImportResult>> {
+    const { bytes, onProgress, ...rest } = input;
+    const { payload, done } = this.sqlProgress(rest, onProgress);
+    // A picked File must be read HERE and transferred — a File reference does
+    // not survive postMessage into the viewer (NotReadableError otherwise).
+    if (bytes instanceof Blob) {
+      return bytes
+        .arrayBuffer()
+        .then((buf) =>
+          this.send<SqlImportResult>('sql.import', payload, { bytes: buf, timeoutMs: this.importTimeoutMs }),
+        )
+        .finally(done);
+    }
+    return this.send<SqlImportResult>('sql.import', payload, { bytes, timeoutMs: this.importTimeoutMs }).finally(done);
+  }
+
+  /** Subscribe to this batch's SQL import ticks and tag the payload so the
+   *  viewer keeps its own dialogs down while the host draws progress. */
+  private sqlProgress(
+    payload: Record<string, unknown>,
+    onProgress?: (p: SqlImportProgress) => void,
+  ): { payload: Record<string, unknown>; done: () => void } {
+    if (!onProgress) {
+      return { payload, done: () => undefined };
+    }
+    const batchId = \`\${this.idPrefix}-sql-\${this.nextId++}\`;
+    const off = this.on('sql.importUrl:progress', (p) => {
+      const pr = p as SqlImportProgress & { batchId?: string };
+      if (pr.batchId === batchId) {
+        onProgress(pr);
+      }
+    });
+    return { payload: { ...payload, batchId, progress: true }, done: off };
+  }
+
+  /** Batch-import .db/.sqlite files the VIEWER downloads by URL — nothing
+   *  rides postMessage, and each download is STREAMED straight into OPFS
+   *  (constant memory, so multi-GB databases are fine). URLs are fetched
+   *  under the viewer origin's CORS, not the host's. \`replace: true\`
+   *  overwrites an existing same-name db; false (default) skips it WITHOUT
+   *  downloading. The md5 of the downloaded bytes is recorded per file (see
+   *  \`sqlList\`) — hash your hosted file and compare first to skip unchanged
+   *  imports entirely. Files run serially; a download failure lands in
+   *  \`failed\` and never aborts the rest. */
+  sqlImportUrl(input: {
+    files: SqlImportUrlFile[];
+    /** destination store (default 'main'); must be a known store name */
+    store?: string;
+    replace?: boolean;
+    /** per-file AND per-chunk progress — "fetching file X of Y" plus a real
+     *  download percentage from \`loaded\`/\`totalBytes\`. Passing it also
+     *  silences the viewer's own import dialogs. */
+    onProgress?: (p: SqlImportProgress) => void;
+    /** Abort the batch: the viewer stops its downloads and starts no more
+     *  files (whatever already landed stays imported). Resolves \`cancelled\`. */
+    signal?: AbortSignal;
+  }): Promise<Result<SqlImportUrlResult>> {
+    const { onProgress, signal, ...rest } = input;
+    const { payload, done } = this.sqlProgress(rest, onProgress);
+    return this.send<SqlImportUrlResult>('sql.importUrl', payload, {
+      timeoutMs: this.importTimeoutMs,
+      ...(signal ? { signal } : {}),
+    }).finally(done);
+  }
+
+  /** Pre-flight a SQL script WITHOUT running it. \`dbs\`: which databases it
+   *  references (the optional \`mainDb\` plus every \`ATTACH DATABASE '…'\`
+   *  literal, in appearance order) and whether they are present — present
+   *  entries carry \`size\` / \`modified\` / \`md5\` (import-time hash of the
+   *  delivered bytes), so a host can compare against its manifest and
+   *  \`sqlImportUrl\` only the missing or outdated files before calling
+   *  \`sqlQuery\`. \`statements\`: the statements the script would actually run,
+   *  comments stripped, each labelled with its leading keyword and whether it
+   *  answers with rows — enough to reject a script that writes, to count the
+   *  queries, or to tell "empty" from "only comments" before running it. */
+  sqlCheck(input: {
+    sql: string;
+    mainDb?: string;
+  }): Promise<Result<{ dbs: SqlCheckEntry[]; statements: SqlCheckStatement[] }>> {
+    return this.send('sql.check', input);
+  }
+
+  // ── camera ────────────────────────────────────────────────────────────────
+  /** The camera's current placement — both as orbit parameters and as an eye
+   *  \`position\`. Round-trips: hand what you get back to \`cameraSet\` (or to
+   *  \`assetsLoad\`'s \`camera\` option) to restore this exact view. */
+  cameraGet(): Promise<Result<CameraState>> {
+    return this.send('camera.get', {});
+  }
+
+  /** Move the camera. Give an eye \`position\` + \`target\`, or orbit parameters;
+   *  omitted fields keep their current value. \`animate: false\` snaps instead
+   *  of gliding. Resolves once the camera has ARRIVED, so a chained call sees
+   *  the final view; an explicit placement also keeps the first-model default
+   *  view from overriding it. To place the camera as models appear, prefer the \`camera\`
+   *  option on \`assetsLoad\` / \`assetsSetLoaded\` — it replaces their framing
+   *  step, so the view never fits first and then jumps. */
+  cameraSet(
+    camera: CameraInput,
+  ): Promise<Result<{ target: [number, number, number]; azimuth: number; elevation: number; distance: number }>> {
+    return this.send('camera.set', { ...camera });
+  }
+
+  // ── viewpoints ────────────────────────────────────────────────────────────
+  /** The whole viewpoint set as one opaque JSON blob — the same shape the
+   *  panel's Save button writes to file. Persist it host-side (per user, per
+   *  project…) and restore it later with \`viewpointsSet\`. */
+  viewpointsGet(): Promise<Result<{ config: ViewpointsConfig }>> {
+    return this.send('viewpoints.get', {});
+  }
+
+  /** REPLACE the current viewpoint set from a config blob (from
+   *  \`viewpointsGet\`, a \`viewpoints.bookmark\` event, or a saved viewpoints
+   *  JSON file — same shape). Viewpoints carry model-relative content
+   *  (fullnames, positions, color rules), so restore them alongside the same
+   *  loaded models. \`showViewer: true\` then docks the Viewpoint Viewer panel
+   *  on the RIGHT and makes it active, ready to present.
+   *  \`activateFirst: true\` also RUNS the first viewpoint of the loaded set —
+   *  camera, clipping, labels, measurements, Set Color rules and selection,
+   *  as clicking it in the panel does — so a host can restore a session in
+   *  one call. A load on its own only selects it. \`activated\` says whether
+   *  one ran (false for an empty set). Built for page load: it waits for the
+   *  viewport to finish booting first (\`app.ready\` normally reports
+   *  \`gpu: 'booting'\`, and activating before the renderer exists would apply
+   *  the viewpoint except its camera), then resolves once the viewpoint is
+   *  applied, with the camera still gliding into place. */
+  viewpointsSet(
+    config: ViewpointsConfig,
+    opts?: { showViewer?: boolean; activateFirst?: boolean },
+  ): Promise<Result<{ loaded: number; activated: boolean }>> {
+    return this.send('viewpoints.set', {
+      config,
+      ...(opts?.showViewer ? { showViewer: true } : {}),
+      ...(opts?.activateFirst ? { activateFirst: true } : {}),
+    });
+  }
+
+  /** REPLACE the current viewpoint set from a hosted viewpoints JSON file the
+   *  VIEWER downloads itself (viewer-origin CORS, like the other *Url
+   *  commands) — same blob shape as \`viewpointsGet\` / a panel-saved file.
+   *  \`showViewer: true\` then docks the Viewpoint Viewer panel on the RIGHT
+   *  and makes it active, ready to present the loaded set, and
+   *  \`activateFirst: true\` runs the first viewpoint of that set — both behave
+   *  exactly as on \`viewpointsSet\`. */
+  viewpointsSetUrl(
+    url: string,
+    opts?: { showViewer?: boolean; activateFirst?: boolean },
+  ): Promise<Result<{ loaded: number; activated: boolean }>> {
+    return this.send('viewpoints.setUrl', {
+      url,
+      ...(opts?.showViewer ? { showViewer: true } : {}),
+      ...(opts?.activateFirst ? { activateFirst: true } : {}),
+    });
+  }
+
+  /** Add one viewpoint per label with a linked fullname — what the Labels
+   *  panel's "Selected to viewpoints" button does: the label's first line as
+   *  the name, the fullname as the viewpoint's selection, the label copied
+   *  in, and the camera pivoted on the label's anchor at the distance that
+   *  frames the item (never closer than 2 m, current view direction kept).
+   *  Pick labels by \`ids\` (from \`labelsGet\`) and/or \`fullnames\`; with
+   *  neither, the SELECTED labels are used. Labels without a fullname are
+   *  \`ignored\`, and a fullname + name pair some viewpoint already carries is
+   *  \`skipped\`, so calling again only adds what is new. Nothing is
+   *  activated; \`showViewer: true\` docks the Viewpoint Viewer on the right. */
+  viewpointsAddFromLabels(opts?: {
+    ids?: number[];
+    fullnames?: string[];
+    showViewer?: boolean;
+  }): Promise<Result<{ added: number; skipped: number; ignored: number }>> {
+    return this.send('viewpoints.addFromLabels', { ...opts });
+  }
+
+  /** Show (or remove, with null) a SESSION-ONLY bookmark button in the
+   *  Viewpoints panel, between Add viewpoint and Save. When the user clicks
+   *  it the viewer fires the unsolicited \`viewpoints.bookmark\` event with the
+   *  current config attached — subscribe with \`onViewpointsBookmark\` and
+   *  persist it wherever bookmarks live. Like host-set external apps, the
+   *  button is never persisted: gone on reload until set again after
+   *  \`app.ready\`. */
+  viewpointsSetBookmarkButton(button: { label: string; tooltip?: string } | null): Promise<Result<{ shown: boolean }>> {
+    return this.send('viewpoints.setBookmarkButton', { button });
+  }
+
+  /** Subscribe to the bookmark-button click event (see
+   *  \`viewpointsSetBookmarkButton\`). Returns an unsubscribe function. */
+  onViewpointsBookmark(handler: (e: ViewpointsBookmarkEvent) => void, opts?: SubscribeOptions): () => void {
+    return this.on('viewpoints.bookmark', (payload) => handler(payload as ViewpointsBookmarkEvent), opts);
+  }
+
+  // ── external dialogs (open external-app modals) ───────────────────────────
+  /** Every external app the viewer hosts right now — modal dialogs and dock
+   *  panels, told apart by \`kind\` — with its \`hidden\` state. The ids are what
+   *  \`uiDialogHide\` / \`uiDialogShow\` / \`uiDialogClose\` / \`uiDialogRename\`
+   *  address (each also takes the \`tdsDialogId\`), and are also returned as
+   *  \`dialogId\` by \`externalAppsSet\` for an entry it opened. For changes after
+   *  this snapshot, subscribe with \`onDialogChanged\`. */
+  uiDialogs(): Promise<Result<{ dialogs: DialogInfo[] }>> {
+    return this.send('ui.dialogs', {});
+  }
+
+  /** Hide a dialog WITHOUT closing it: the iframe stays mounted, so its page
+   *  keeps running and keeps its state (a half-filled form, a live session)
+   *  and \`uiDialogShow\` brings it back exactly as it was — unlike closing,
+   *  which drops the context. Park a dialog while a model loads, then either
+   *  show it again or close it. Omit \`id\` from inside an embedded app to hide
+   *  the dialog hosting it. Modal dialogs only — a panel id is a bad-payload
+   *  error, a dock panel has no hidden state. */
+  uiDialogHide(id?: string): Promise<Result<{ id: string; hidden: boolean }>> {
+    return this.send('ui.dialog.hide', id ? { id } : {});
+  }
+
+  /** Re-show a hidden dialog (and raise it above the other dialogs). */
+  uiDialogShow(id?: string): Promise<Result<{ id: string; hidden: boolean }>> {
+    return this.send('ui.dialog.show', id ? { id } : {});
+  }
+
+  /** Close a dialog or panel by id — its page is unmounted, its context lost;
+   *  \`remove: true\` also forgets the instance for good (see \`uiClose\`). Omit
+   *  \`id\` from inside an embedded app to close the dialog hosting it (the
+   *  same as \`uiClose\`). */
+  uiDialogClose(
+    id?: string,
+    opts?: { remove?: boolean },
+  ): Promise<Result<{ id: string; closed: boolean; removed: boolean }>> {
+    return this.send('ui.dialog.close', { ...(id ? { id } : {}), ...(opts?.remove ? { remove: true } : {}) });
+  }
+
+  /** Retitle a dialog's title bar or a panel's tab — and the \`name\` that
+   *  \`uiDialogs\` reports; the app entry's own name (the ribbon button) is
+   *  untouched. A report list that just opened one report can name itself
+   *  after it. \`id\` is the dialog / panel id or the page's own \`tdsDialogId\`;
+   *  omit it from inside the page to rename whatever hosts the caller. Fires
+   *  \`dialog.changed\` with \`state: 'renamed'\`. */
+  uiDialogRename(title: string, id?: string): Promise<Result<{ id: string; title: string }>> {
+    return this.send('ui.dialog.rename', id ? { id, title } : { title });
+  }
+
+  /** Ask the viewer to tell THIS page before its dialog / panel is unmounted
+   *  (\`dialog.changed\` with \`state: 'closing'\`) and to wait for
+   *  \`uiDialogReleaseClose\` — or \`timeoutMs\` (default 3000, max 10000) —
+   *  before dropping the iframe. The dialog / tab disappears at once either
+   *  way; only the unmount waits. \`onDialogClosing\` wraps this — prefer it.
+   *  \`hold: false\` lifts the request. The hold dies with the page. */
+  uiDialogHoldClose(
+    hold: boolean,
+    timeoutMs?: number,
+    id?: string,
+  ): Promise<Result<{ id: string; hold: boolean; timeoutMs?: number }>> {
+    return this.send('ui.dialog.holdClose', {
+      hold,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(id ? { id } : {}),
+    });
+  }
+
+  /** Done flushing: let a held close (see \`uiDialogHoldClose\`) finish now.
+   *  \`released\` is false when no close was waiting. */
+  uiDialogReleaseClose(id?: string): Promise<Result<{ id: string; released: boolean }>> {
+    return this.send('ui.dialog.releaseClose', id ? { id } : {});
+  }
+
+  // ── external apps (session-only host configuration) ───────────────────────
+  /** Declaratively set the SESSION-ONLY host-managed external apps: replaces
+   *  any prior host-set entries with \`apps\` (user-configured Settings entries
+   *  are untouched). Entries appear in the External ribbon; their origins get
+   *  postMessage API access for this session. Nothing is persisted — a reload
+   *  drops them until the host calls this again after \`app.ready\`, so a viewer
+   *  opened without its host has none. \`openOnStart: true\` opens that entry
+   *  immediately (panels/modals only — new-window entries are popup-blocked
+   *  without a user gesture; a \`multiple\` entry opens a NEW instance per call,
+   *  a single-instance one re-focuses the open one); an entry opened that way reports its \`dialogId\`
+   *  — a modal's dialog id or a panel's id — which \`uiDialogClose\` /
+   *  \`uiDialogRename\` (and, for a modal, \`uiDialogHide\` / \`uiDialogShow\`)
+   *  address. Call
+   *  with \`[]\` to clear the host-set entries. An entry whose URL is on the
+   *  VIEWER's own origin comes back with a \`warning\`: no sandbox isolates a
+   *  same-origin page from the viewer window, so only host pages you fully
+   *  trust belong there (a page on any other origin is isolated by the
+   *  browser's same-origin policy regardless of \`sandbox\` / \`allow\`).
+   *
+   *  Give entries a stable \`id\` (see {@link HostExternalApp.id}) when you
+   *  re-set the apps for a new context — a project switch, say — so an open
+   *  dialog of an app that stays in the set keeps running instead of turning
+   *  into an orphan. An entry opened by this call also reports the
+   *  \`tdsDialogId\` its page sees on its URL (\`?tdsDialogId=\`), the value the
+   *  page keys its saved state by across a close → reopen. */
+  externalAppsSet(apps: HostExternalApp[]): Promise<
+    Result<{
+      apps: {
+        id: string;
+        name: string;
+        url: string;
+        dialogId?: string;
+        tdsDialogId?: string;
+        warning?: string;
+      }[];
+      opened: number;
+    }>
+  > {
+    return this.send('externalApps.set', { apps });
+  }
+
+  /** List every configured external app — user-configured (Settings) and
+   *  host-set session entries alike, told apart by \`hostManaged\`. */
+  externalAppsList(): Promise<Result<{ apps: ExternalAppInfo[] }>> {
+    return this.send('externalApps.list', {});
+  }
+
+  /** Delete databases by their OPFS \`path\` (from \`sqlList\`). A path in use by a
+   *  running query (or another tab) is skipped, not waited on. */
+  sqlDelete(paths: string[]): Promise<Result<{ deleted: string[]; skipped: string[] }>> {
+    return this.send('sql.delete', { paths });
+  }
+
+  /** Run SQL against \`mainDb\` (a path from \`sqlList\`). ATTACH other databases
+   *  inline with their OPFS path and they are locked automatically. \`lockmode\`
+   *  defaults to 'shared' (read-only, several readers at once); pass
+   *  'exclusive' to write. Rows per statement are capped at \`maxRows\` (default
+   *  10000; a cut statement carries \`truncated: true\`). Results come back one
+   *  entry per statement, in order. */
+  sqlQuery(input: {
+    sql: string;
+    mainDb: string;
+    lockmode?: 'shared' | 'exclusive';
+    maxRows?: number;
+  }): Promise<Result<SqlQueryResult>> {
+    return this.send('sql.query', { ...input }, { timeoutMs: this.importTimeoutMs });
+  }
+
+  /**
+   * Colour the model FROM a query — the SQL editor's Color White / Hidden /
+   * Set buttons, over the API. The query must return a \`fullname\` column and
+   * may return \`fullname_color\` (\`'#ff0000'\`, \`'yellow'\`, \`'default'\`, with an
+   * optional \`:opacity\` suffix); rows without one get yellow.
+   *
+   * Nothing but the counts crosses the boundary: the viewer packs the result
+   * inside its SQL worker and hands it to the model DB as flat buffers, so
+   * this is the form to use for million-row results — \`sqlQuery\` + a colour
+   * rule would ship every name to your page and back.
+   *
+   * \`mode\` picks the treatment — see {@link ColorMode}: the viewer's own
+   * white / hidden / transparent / set-colour base coats, or your own colour
+   * and rule set. Defaults to \`{ type: 'default-white' }\`.
+   */
+  sqlColor(
+    input: SqlRunInput & { mode?: ColorMode; onProgress?: (p: { rows: number }) => void },
+  ): Promise<Result<SqlColorResult>> {
+    const { onProgress, ...rest } = input;
+    const { payload, done } = this.progressFor('sql.color:progress', rest, onProgress);
+    return this.send<SqlColorResult>('sql.color', payload, { timeoutMs: this.importTimeoutMs }).finally(done);
+  }
+
+  /** Select what a query returns (its \`fullname\` column), through the same
+   *  packed path as {@link sqlColor} — the rows never reach your page.
+   *  \`append\` adds to the current selection instead of replacing it. */
+  sqlSelect(
+    input: SqlRunInput & { append?: boolean; onProgress?: (p: { rows: number }) => void },
+  ): Promise<Result<SqlSelectResult>> {
+    const { onProgress, ...rest } = input;
+    const { payload, done } = this.progressFor('sql.select:progress', rest, onProgress);
+    return this.send<SqlSelectResult>('sql.select', payload, { timeoutMs: this.importTimeoutMs }).finally(done);
+  }
+
+  /** Run a query and show it in the viewer's SQL Table panel (\`loadAll\` lifts
+   *  the 50-row preview cap to 250k). The rows land in the panel, not in the
+   *  response — you get the column names and the row count. \`show: false\`
+   *  fills the panel without opening it. */
+  sqlTable(
+    input: SqlRunInput & { name?: string; loadAll?: boolean; show?: boolean },
+  ): Promise<Result<{ columns: string[]; rows: number }>> {
+    return this.send('sql.table', { ...input }, { timeoutMs: this.importTimeoutMs });
+  }
+
+  /**
+   * Put SQL into the viewer's **SQL Editor** panel — for when the USER should
+   * see, tweak and run a query rather than the host running it headless.
+   * Nothing is executed.
+   *
+   * \`replace\` (default true) swaps the whole script; \`false\` appends the SQL
+   * below what is there as a titled block:
+   *
+   * \`\`\`sql
+   * -------------------------------------------------
+   * -- daily defects
+   * -------------------------------------------------
+   *
+   * select …
+   * \`\`\`
+   *
+   * so several queries can be stacked for the user to run one by one. \`name\`
+   * titles that block (default \`sql\`); passing one also titles a replacing
+   * script. Any text selection is cleared, so the panel's run buttons act on
+   * the whole script.
+   *
+   * \`store\` + \`fileName\` point the editor's Main db at a database without the
+   * host building OPFS paths (\`mainDb\` takes a path directly, \`''\` = the
+   * panel's "None — attach only"); omit them and the current pick stands.
+   * \`show: false\` fills the panel without opening it; otherwise the editor
+   * opens docked to the RIGHT of the viewport (an already-open editor is
+   * focused where it is).
+   *
+   * \`title\`, \`description\`, \`types\` and \`filters\` fill the editor's report
+   * fields — the shape {@link TredespaceClient.sqlEditorGet} returns, so a
+   * draft the host stored comes back whole. They apply whenever present, with
+   * or without \`replace\`; a filter needs a \`key\` (\`kind\` defaults to INPUT).
+   */
+  sqlEditor(input: {
+    sql: string;
+    replace?: boolean;
+    name?: string;
+    store?: string;
+    fileName?: string;
+    mainDb?: string;
+    show?: boolean;
+    title?: string;
+    description?: string;
+    types?: SqlReportType[];
+    filters?: SqlEditorFilter[];
+  }): Promise<Result<{ replaced: boolean; mainDb: string; chars: number }>> {
+    return this.send('sql.editor', { ...input });
+  }
+
+  /**
+   * Read the **SQL Editor**'s draft: the report fields the user filled in —
+   * \`title\` (the report name), \`description\`, \`mainDb\`, \`types\`, \`sql\` and
+   * the \`filters\` — plus \`databases\`, the files a run would lock. The editor
+   * has no Save of its own: store this, and hand it back to
+   * {@link TredespaceClient.sqlEditor} later to restore it unchanged.
+   */
+  sqlEditorGet(): Promise<Result<SqlEditorDraft>> {
+    return this.send('sql.editor.get', {});
+  }
+
+  /** Bind a query to a SQL Detail panel: every hierarchy click runs it against
+   *  the clicked node — write it against TREE_VIEW_ARGS, e.g.
+   *  \`… where fullname in (select FULLNAME from TREE_VIEW_ARGS)\`.
+   *
+   *  \`name\` is the panel's IDENTITY as well as its tab title: each distinct
+   *  name gets its OWN detail panel, so several queries can follow the
+   *  selection side by side, and calling again with a name already in use
+   *  re-binds that panel instead of opening another. Without a name the
+   *  viewer's built-in SQL Detail panel is used. \`show: false\` binds without
+   *  opening the panel. \`panel\` in the response is the dock panel id — pass it
+   *  to {@link uiShowPanel} / {@link uiHidePanel}.
+   *
+   *  \`autoRemove\` (default true) decides what CLOSING a named panel does:
+   *  true deletes the panel and its query outright, false keeps it in the
+   *  viewer's Panels list so reopening restores the query. The panel header
+   *  carries the same switch (an Auto-remove / Keep button); OMIT the field
+   *  when re-binding a query and whatever the user chose there stands — pass
+   *  it only to set it. A layout change (kiosk, a layout slot) never counts as
+   *  a close. The response reports the value in effect.
+   *
+   *  Named panels last for the viewer SESSION (like host-managed external
+   *  apps): after a page reload, create them again. */
+  sqlDetail(
+    input: SqlRunInput & { name?: string; show?: boolean; autoRemove?: boolean },
+  ): Promise<Result<{ bound: boolean; name: string; panel: string; autoRemove: boolean }>> {
+    return this.send('sql.detail', { ...input });
+  }
+
+  /** Run a BATCH of statements against \`mainDb\` in ONE transaction, with the
+   *  full per-statement contract: bindings (bulk rows step a prepared
+   *  statement), \`collect\` per statement, names for readable results. The
+   *  whole batch commits or rolls back together (with \`lockmode: 'exclusive'\`;
+   *  'shared' is read-only). \`attach\` lists extra database paths to lock; any
+   *  \`ATTACH DATABASE '…'\` literal in a statement is locked automatically as
+   *  well. \`onProgress\` gets a tick per finished statement and every
+   *  \`progressSize\` (default 1000) rows — use it for long loads. Same row cap
+   *  rules as \`sqlQuery\`. */
+  sqlExecute(input: {
+    mainDb: string;
+    statements: SqlStatementInput[];
+    attach?: string[];
+    lockmode?: 'shared' | 'exclusive';
+    maxRows?: number;
+    /** rows between \`row\` ticks (default 1000); smaller = more ticks, slower */
+    progressSize?: number;
+    onProgress?: (p: SqlExecuteProgress) => void;
+    /** Give up on the result. A statement already running inside the SQLite
+     *  worker cannot be stopped (that would abort every tab's query), so this
+     *  stops one that has not started and resolves \`cancelled\` either way. */
+    signal?: AbortSignal;
+  }): Promise<Result<SqlExecuteResult>> {
+    const { onProgress, signal, ...rest } = input;
+    const { payload, done } = this.progressFor('sql.execute:progress', rest, onProgress);
+    return this.send<SqlExecuteResult>('sql.execute', payload, {
+      timeoutMs: this.importTimeoutMs,
+      ...(signal ? { signal } : {}),
+    }).finally(done);
+  }
+
+  /** Subscribe to one batch's ticks on \`eventType\` and tag the payload with
+   *  the batch id + \`progress: true\`; \`done\` unsubscribes. */
+  private progressFor<T>(
+    eventType: string,
+    payload: Record<string, unknown>,
+    onProgress?: (p: T) => void,
+  ): { payload: Record<string, unknown>; done: () => void } {
+    if (!onProgress) {
+      return { payload, done: () => undefined };
+    }
+    const batchId = \`\${this.idPrefix}-\${eventType.replace(/[^a-z]/gi, '')}-\${this.nextId++}\`;
+    const off = this.on(eventType, (p) => {
+      const pr = p as T & { batchId?: string };
+      if (pr.batchId === batchId) {
+        onProgress(pr);
+      }
+    });
+    return { payload: { ...payload, batchId, progress: true }, done: off };
+  }
+
+  /** Toggle kiosk mode (viewport only — panels hidden). Omit \`on\` to query
+   *  the current state without changing it. */
+  uiKiosk(on?: boolean): Promise<Result<{ kiosk: boolean }>> {
+    return this.send('ui.kiosk', on === undefined ? {} : { on });
+  }
+
+  /** Set the viewer's colour theme, or omit \`theme\` to query the current one
+   *  without changing it. Handy for keeping an embedded viewer in step with the
+   *  host page's light/dark mode. */
+  uiTheme(theme?: 'dark' | 'light'): Promise<Result<{ theme: 'dark' | 'light' }>> {
+    return this.send('ui.theme', theme === undefined ? {} : { theme });
+  }
+
+  /** Ask the viewer to close the dialog/panel hosting THIS window (embedded
+   *  external apps closing themselves, e.g. a project selector after pick).
+   *  \`remove: true\` forgets the instance for good: the dock manager drops a
+   *  panel's definition and remembered location once the close completes, and
+   *  the \`tdsDialogId\` is dropped so a later open under the same entry starts
+   *  fresh — the natural end for one tab of a \`multiple\` app. A close hold
+   *  (\`onDialogClosing\`) is honoured either way. */
+  uiClose(opts?: { remove?: boolean }): Promise<Result<{ closed: boolean; removed: boolean }>> {
+    return this.send('ui.close', opts?.remove ? { remove: true } : {});
+  }
+
+  /** Open / close a dock panel by id (e.g. 'hierarchy'). */
+  uiShowPanel(panel: string): Promise<Result<{ shown: boolean }>> {
+    return this.send('ui.showPanel', { panel });
+  }
+  /** Hide a dock panel by id (counterpart of {@link uiShowPanel}). */
+  uiHidePanel(panel: string): Promise<Result<{ hidden: boolean }>> {
+    return this.send('ui.hidePanel', { panel });
+  }
+
+  /** Show / hide the blocking loading overlay. \`header\` is the bold title line,
+   *  \`title\` the message below it. Never queues behind another command, so it
+   *  can be called from the \`onProgress\` callback of a long import or query
+   *  and appear while that work is still running. */
+  uiLoadingShow(opts?: { header?: string; title?: string }): Promise<Result<Record<string, never>>> {
+    return this.send('ui.loading.show', { ...opts });
+  }
+  /** Hide the blocking loading overlay shown by {@link uiLoadingShow}. Skips
+   *  the command queue for the same reason. */
+  uiLoadingHide(): Promise<Result<Record<string, never>>> {
+    return this.send('ui.loading.hide', {});
+  }
+
+  /** Show a confirm dialog; resolves with the user's choice. */
+  uiConfirm(opts: {
+    question: string;
+    header?: string;
+    yes?: string;
+    no?: string;
+  }): Promise<Result<{ confirmed: boolean }>> {
+    return this.send('ui.confirm', { ...opts });
+  }
+
+  /** Show an error dialog. \`title\` is the message, \`header\` the bold title. */
+  uiError(opts: { title: string; header?: string }): Promise<Result<Record<string, never>>> {
+    return this.send('ui.error', { ...opts });
+  }
+
+  /** The Console panel's lines — the pinned startup block (welcome, version,
+   *  GPU checks) and up to the last 1500 messages after it, oldest first.
+   *  \`levels\` keeps only those kinds, \`limit\` the most recent N of what is
+   *  left; \`rotated\` is how many lines the panel has already dropped. */
+  consoleGet(opts?: {
+    levels?: ConsoleLevel[];
+    limit?: number;
+  }): Promise<Result<{ lines: ConsoleLine[]; rotated: number }>> {
+    return this.send('console.get', { ...opts });
+  }
+  /** Clear the Console — everything after the startup block goes, the block
+   *  itself stays (the panel's own Clear). Returns how many lines went. */
+  consoleClear(): Promise<Result<{ cleared: number }>> {
+    return this.send('console.clear', {});
+  }
+  /** Append a line to the Console; \`level\` defaults to \`'info'\`. */
+  consoleAdd(text: string, level?: ConsoleLevel): Promise<Result<{ id: number }>> {
+    return this.send('console.add', { text, ...(level ? { level } : {}) });
+  }
+
+  /** Replace (default) or merge the viewer's shared instance data — one JSON
+   *  object per viewer window, for cross-dialog coordination. Every host gets
+   *  an \`instance.changed\` event afterwards. */
+  instanceSet(
+    data: Record<string, unknown>,
+    opts?: { merge?: boolean },
+  ): Promise<Result<{ data: Record<string, unknown> }>> {
+    return this.send('instance.set', { data, merge: opts?.merge ?? false });
+  }
+
+  /** Read the viewer's shared instance data (see {@link instanceSet}). */
+  instanceGet(): Promise<Result<{ data: Record<string, unknown> }>> {
+    return this.send('instance.get', {});
+  }
+
+  // ── unsolicited app → host events ─────────────────────────────────────────
+
+  /** Listen for an app event (\`id: null\` messages) — the event types are
+   *  listed in the file header ("EVENTS"). Returns an unsubscribe function. */
+  /** Subscribe to a viewer event, or one of the client's own — typed by
+   *  name through {@link TredespaceEventMap}; a name not in the map gets
+   *  \`unknown\`. The first handler for a viewer event type also tells the
+   *  viewer to send it (\`events.subscribe\`): the viewer posts a client only
+   *  what it listens for, and re-learns the list after every \`app.ready\`.
+   *  Returns the unsubscribe; aborting \`signal\` does the same. */
+  on<K extends keyof TredespaceEventMap>(
+    type: K,
+    handler: (payload: TredespaceEventMap[K]) => void,
+    opts?: SubscribeOptions,
+  ): () => void;
+  on(type: string, handler: (payload: unknown) => void, opts?: SubscribeOptions): () => void;
+  on(type: string, handler: (payload: never) => void, opts?: SubscribeOptions): () => void {
+    if (opts?.signal?.aborted) {
+      return () => undefined; // never subscribed — same as addEventListener
+    }
+    let set = this.eventHandlers.get(type);
+    if (!set) {
+      set = new Set();
+      this.eventHandlers.set(type, set);
+    }
+    const h = handler as (payload: unknown) => void;
+    set.add(h);
+    if (!LOCAL_EVENTS.has(type) && !this.wireTypes.has(type)) {
+      this.wireTypes.add(type);
+      if (this.readyPayload) {
+        this.subscribeWire([type]);
+      }
+    }
+    const off = () => void set.delete(h);
+    opts?.signal?.addEventListener('abort', off, { once: true });
+    return off;
+  }
+
+  /** The next event of a type as a promise — \`await client.once('tree.select')\`.
+   *  Rejects with a {@link TredespaceClientError} after \`timeoutMs\`, when
+   *  \`signal\` aborts, or when the client closes first. */
+  once<K extends keyof TredespaceEventMap>(
+    type: K,
+    opts?: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<TredespaceEventMap[K]>;
+  once(type: string, opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<unknown>;
+  once(type: string, opts: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      if (this.isClosed) {
+        reject(new TredespaceClientError('transport', \`once(\${type}): client closed\`));
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const fail = (e: TredespaceClientError) => {
+        done();
+        reject(e);
+      };
+      const onAbort = () => fail(new TredespaceClientError('transport', \`once(\${type}): aborted\`));
+      const off = this.on(type, (p) => {
+        done();
+        resolve(p);
+      });
+      const offClosed = this.on('client.closed', () =>
+        fail(new TredespaceClientError('transport', \`once(\${type}): client closed\`)),
+      );
+      const done = () => {
+        off();
+        offClosed();
+        opts.signal?.removeEventListener('abort', onAbort);
+        if (timer) {
+          clearTimeout(timer);
+        }
+      };
+      opts.signal?.addEventListener('abort', onAbort, { once: true });
+      if (opts.timeoutMs !== undefined) {
+        timer = setTimeout(
+          () => fail(new TredespaceClientError('timeout', \`once(\${type}): no event within \${opts.timeoutMs} ms\`)),
+          opts.timeoutMs,
+        );
+      }
+    });
+  }
+
+  /** Typed convenience for the tree-click event. */
+  onTreeSelect(handler: (e: TreeSelectEvent) => void, opts?: SubscribeOptions): () => void {
+    return this.on('tree.select', (p) => handler(p as TreeSelectEvent), opts);
+  }
+
+  // ── custom-event bus ───────────────────────────────────────────────────────
+
+  /** Join the custom-event bus: whatever other connected pages post with
+   *  {@link customPost} arrives at \`handler\` (a host page, its panels inside
+   *  the viewer and tabs the viewer opened can all talk to each other this
+   *  way, through the viewer, without sharing an origin). Resolves to the id
+   *  the viewer gave this page. \`name\` and \`tag\` are what other pages see;
+   *  \`events\` narrows what reaches you (an empty list = presence only).
+   *  Call it again to change any of them — the latest call is the subscription; every handler
+   *  given so far stays attached. Aborting \`signal\` drops that handler and
+   *  leaves the bus when none remain. JSON only, about 1 MB per event.
+   *  Not for secrets: everything passes through the viewer and reaches every
+   *  addressed subscriber — for sensitive data talk to the other window
+   *  directly with \`postMessage\` (\`window.parent.parent\`, \`window.opener\`,
+   *  answer on \`event.source\` after checking \`event.origin\`) — unless you
+   *  host the viewer yourself and have validated its origin allowlist and
+   *  registered apps, in which case the bus is as private as that list. */
+  customSubscribe(
+    handler: (e: CustomEventPayload) => void,
+    opts: CustomSubscribeOptions = {},
+  ): Promise<Result<{ clientId: string }>> {
+    if (opts.signal?.aborted) {
+      return Promise.resolve({ error: { code: 'transport', msg: 'customSubscribe: signal already aborted' } });
+    }
+    const joined = this.send<{ clientId: string }>('custom.subscribe', {
+      ...(opts.name !== undefined ? { name: opts.name } : {}),
+      ...(opts.tag !== undefined ? { tag: opts.tag } : {}),
+      ...(opts.events !== undefined ? { events: opts.events } : {}),
+    });
+    this.on('custom.event', (p) => handler(p as CustomEventPayload), { signal: opts.signal });
+    opts.signal?.addEventListener('abort', () => this.leaveBusIfIdle(), { once: true });
+    return joined;
+  }
+
+  /** An aborted subscribe signal dropped its handler; with none left the
+   *  page leaves the bus. */
+  private leaveBusIfIdle(): void {
+    if (!this.eventHandlers.get('custom.event')?.size) {
+      void this.send('custom.unsubscribe', {});
+    }
+  }
+
+  /** Leave the bus: every handler given to {@link customSubscribe} is
+   *  dropped and the viewer stops delivering to this page. Disposing the
+   *  client (or the page going away) does the same. */
+  customUnsubscribe(): Promise<Result<Record<string, never>>> {
+    this.eventHandlers.delete('custom.event');
+    return this.send('custom.unsubscribe', {});
+  }
+
+  /** Post a custom event to the other subscribers — every one of them, or
+   *  just the ids in \`to\` (from {@link customClients} or an earlier event's
+   *  \`from.id\`). You never receive your own event. \`data\` must be JSON
+   *  (about 1 MB at most); it arrives exactly as a JSON round trip leaves it.
+   *  Posting does not require being subscribed. \`missed\` lists addressed ids
+   *  that did not get it. Not for secrets — coordination only; see
+   *  {@link customSubscribe}. */
+  customPost(event: string, data?: unknown, opts?: { to?: string | string[] }): Promise<Result<CustomPostResult>> {
+    return this.send('custom.post', {
+      event,
+      ...(data !== undefined ? { data } : {}),
+      ...(opts?.to !== undefined ? { to: opts.to } : {}),
+    });
+  }
+
+  /** Every page connected to this viewer — yours included, as \`self\` — with
+   *  its kind, origin, chosen name and whether it is on the bus. Pages that
+   *  never subscribed are listed too, so a host can see its panels; only
+   *  subscribed ones can be posted to. */
+  customClients(): Promise<Result<CustomClientsResult>> {
+    return this.send('custom.clients', {});
+  }
+
+  /** Presence on the bus: fires for subscribers whenever a client joins,
+   *  leaves, renames or disconnects, with the full list. Subscribe with
+   *  \`events: []\` to get only this. */
+  onClientsChanged(handler: (e: ClientsChangedEvent) => void, opts?: SubscribeOptions): () => void {
+    return this.on('custom.clients.changed', (p) => handler(p as ClientsChangedEvent), opts);
+  }
+
+  /** Typed convenience for viewer theme changes — fired whichever way the
+   *  theme switched (Settings tab, hotkey, \`uiTheme\`, or another tab syncing
+   *  its settings over), so a host page and every embedded app can restyle in
+   *  step with the viewer. */
+  onThemeChanged(handler: (e: { theme: 'dark' | 'light' }) => void, opts?: SubscribeOptions): () => void {
+    return this.on('theme.changed', (p) => handler(p as { theme: 'dark' | 'light' }), opts);
+  }
+
+  /** Typed convenience for instance-data changes (any dialog called instance.set). */
+  onInstanceChanged(handler: (e: { data: Record<string, unknown> }) => void, opts?: SubscribeOptions): () => void {
+    return this.on('instance.changed', (p) => handler(p as { data: Record<string, unknown> }), opts);
+  }
+
+  /** Typed convenience for the local \`client.closed\` event: this client's link
+   *  ended — \`dispose()\` / the constructor signal (\`disposed\`), the opener
+   *  relaying for it went away (\`relay\`), or its target window was found
+   *  closed (\`target\`). Fires once, after pending requests were settled with
+   *  a \`transport\` error; nothing follows it. */
+  onClosed(handler: (e: ClientClosedEvent) => void, opts?: SubscribeOptions): () => void {
+    return this.on('client.closed', (p) => handler(p as ClientClosedEvent), opts);
+  }
+
+  /** The viewer is going away — reload, navigation, its tab closing, or
+   *  into the back-forward cache. Opt-in: only pages that subscribe hear it.
+   *  Before it fires, every in-flight request has been settled with a
+   *  \`transport\` error and \`ready()\` is armed again, so \`await ready()\` waits
+   *  for the next \`app.ready\` (a reloaded iframe comes back on the same
+   *  client — this is NOT \`client.closed\`). Show "not connected" here and
+   *  put things back in {@link onAppReady}. */
+  onAppBye(handler: (e: AppByeEvent) => void, opts?: SubscribeOptions): () => void {
+    return this.on('app.bye', (p) => handler(p as AppByeEvent), opts);
+  }
+
+  /** Every \`app.ready\` — the first boot and each one after an \`app.bye\`
+   *  (reload, back from the back-forward cache). The place to (re)do what a
+   *  fresh viewer has forgotten: subscribe to the bus again (every page gets
+   *  a new client id), set instance data, register host apps. \`ready()\`
+   *  resolves the same payload for code that only needs the first one. */
+  onAppReady(handler: (e: AppReady) => void, opts?: SubscribeOptions): () => void {
+    return this.on('app.ready', (p) => handler(p as AppReady), opts);
+  }
+
+  /** \`app.error\`: the viewport failed — WebGPU did not initialise, the device
+   *  was lost, or a recovery failed. The API keeps working (SQL, assets, the
+   *  bus); only rendering is gone until the user reloads. \`ready()\` still
+   *  resolves, so a page that connects late checks {@link appInfo}'s \`gpu\`
+   *  instead. */
+  onAppError(handler: (e: AppErrorEvent) => void, opts?: SubscribeOptions): () => void {
+    return this.on('app.error', handler, opts);
+  }
+
+  /** Typed convenience for the local \`relay.changed\` event — per window passed
+   *  to \`relay()\`: \`connected\` when its page's client says hello (again after
+   *  each navigation), \`disconnected\` when that client disposes or the page
+   *  unloads (the relay stays — it may be navigating), \`closed\` when the
+   *  window is gone and the relay was dropped. */
+  onRelayChanged(handler: (e: RelayChangedEvent) => void, opts?: SubscribeOptions): () => void {
+    return this.on('relay.changed', (p) => handler(p as RelayChangedEvent), opts);
+  }
+
+  /** Typed convenience for external-dialog lifecycle changes — opened, hidden,
+   *  shown, renamed, closed — whichever route caused them (the ✕, \`uiClose\`,
+   *  the \`uiDialog*\` methods, \`externalAppsSet\`, a layout swap dropping a
+   *  panel). Fires for EVERY external dialog and panel in the viewer: a host
+   *  tracking them all calls \`uiDialogs\` for the current
+   *  set and keeps it current with this. A page running INSIDE a dialog passes
+   *  \`{ self: true }\` to hear about its own dialog only — matched against the
+   *  \`?tdsDialogId=\` on the page's URL (nothing is delivered when the URL has
+   *  none, i.e. the page is not hosted in a viewer dialog). */
+  onDialogChanged(handler: (e: DialogChangedEvent) => void, opts?: DialogSubscribeOptions): () => void {
+    const me = opts?.self ? new URLSearchParams(location.search).get('tdsDialogId') : null;
+    return this.on(
+      'dialog.changed',
+      (p) => {
+        const e = p as DialogChangedEvent;
+        if (opts?.self && e.tdsDialogId !== me) {
+          return;
+        }
+        handler(e);
+      },
+      opts,
+    );
+  }
+
+  /** Run code before the dialog / panel hosting THIS page is unmounted — the
+   *  ✕, \`uiClose\`, \`uiDialogClose\`, whichever route. Subscribing asks the
+   *  viewer to hold the close: the dialog / tab disappears at once, but the
+   *  page stays mounted (hidden) until every handler has run — a returned
+   *  promise (any promise, e.g. straight from \`instanceSet\`) is awaited — or
+   *  \`timeoutMs\` passes (default 3000, max 10000);
+   *  then it is unmounted. Save state, tell your backend, close what you
+   *  opened. Not for layout swaps: those unmount immediately, so keep
+   *  persisting as you go (EVENTS.md, "Dialog identity and state"). Only from
+   *  a page INSIDE a viewer dialog or panel. The returned function
+   *  unsubscribes and, with the last handler gone, lifts the hold. */
+  onDialogClosing(handler: (e: DialogChangedEvent) => unknown, opts?: DialogClosingOptions): () => void {
+    if (opts?.signal?.aborted) {
+      return () => undefined;
+    }
+    this.closingHandlers.add(handler);
+    void this.uiDialogHoldClose(true, opts?.timeoutMs);
+    if (!this.closingOff) {
+      this.closingOff = this.onDialogChanged((e) => void this.runClosing(e), { self: true });
+    }
+    const off = () => {
+      if (!this.closingHandlers.delete(handler) || this.closingHandlers.size) {
+        return;
+      }
+      this.closingOff?.();
+      this.closingOff = null;
+      void this.uiDialogHoldClose(false);
+    };
+    opts?.signal?.addEventListener('abort', off, { once: true });
+    return off;
+  }
+
+  /** Every closing handler, then the release — a failing handler holds
+   *  neither the others nor the release back. */
+  private async runClosing(e: DialogChangedEvent): Promise<void> {
+    if (e.state !== 'closing') {
+      return;
+    }
+    await Promise.allSettled([...this.closingHandlers].map((h) => Promise.resolve().then(() => h(e))));
+    await this.uiDialogReleaseClose();
+  }
+
+  // ── plumbing ──────────────────────────────────────────────────────────────
+
+  private send<T>(
+    type: string,
+    payload: Record<string, unknown>,
+    extra?: { bytes?: ArrayBuffer | Blob; timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<Result<T>> {
+    const target = this.target;
+    if (!target) {
+      return Promise.resolve({ error: { code: 'transport', msg: 'client disposed (no viewer window)' } });
+    }
+    if (target.closed) {
+      this.close('target');
+      return Promise.resolve({ error: { code: 'transport', msg: 'target window closed' } });
+    }
+    const timeoutMs = extra?.timeoutMs ?? this.timeoutMs;
+    if (!this.readyPayload && this.waitForReady) {
+      // queue behind app.ready rather than collect a \`not-ready\`; the wait
+      // counts against the command's own timeout
+      return this.ready({ timeoutMs }).then(
+        () => this.send<T>(type, payload, extra),
+        (e: unknown) => ({
+          error: {
+            code: e instanceof TredespaceClientError ? e.code : 'transport',
+            msg: \`\${type}: \${e instanceof Error ? e.message : String(e)}\`,
+            err: e,
+          },
+        }),
+      );
+    }
+    if (extra?.signal?.aborted) {
+      return Promise.resolve({ error: { code: 'cancelled', msg: \`\${type}: signal already aborted\` } });
+    }
+    const id = \`\${this.idPrefix}-\${this.nextId++}\`;
+    return new Promise<Result<T>>((resolve) => {
+      // Giving up locally is not enough: without this the viewer keeps
+      // downloading / cooking / querying and posts a result nobody reads.
+      const stopViewer = () => {
+        try {
+          target.postMessage(
+            { tredespace: TREDESPACE_PROTOCOL, id: null, type: 'command.cancel', payload: { id } },
+            this.origin,
+          );
+        } catch {
+          // the window went away — nothing left to cancel
+        }
+      };
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        extra?.signal?.removeEventListener('abort', onAbort);
+        stopViewer();
+        resolve({ error: { code: 'timeout', msg: \`\${type} timed out after \${timeoutMs} ms\` } });
+      }, timeoutMs);
+      const onAbort = () => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        stopViewer();
+        resolve({ error: { code: 'cancelled', msg: \`\${type} was cancelled\` } });
+      };
+      extra?.signal?.addEventListener('abort', onAbort, { once: true });
+      const settle = (r: Result<unknown>) => {
+        extra?.signal?.removeEventListener('abort', onAbort);
+        (resolve as (x: Result<unknown>) => void)(r);
+      };
+      this.pending.set(id, { settle, timer });
+      const msg: Record<string, unknown> = { tredespace: TREDESPACE_PROTOCOL, id, type, payload };
+      if (extra?.bytes !== undefined) {
+        msg.bytes = extra.bytes;
+        // ArrayBuffer -> transferred (zero-copy, detached in the host). A
+        // Blob/File is passed by structured clone (by reference, no big
+        // allocation). Both are plain postMessage, so cross-origin embedding
+        // is unaffected.
+        if (extra.bytes instanceof ArrayBuffer) {
+          target.postMessage(msg, this.origin, [extra.bytes]);
+        } else {
+          target.postMessage(msg, this.origin);
+        }
+      } else {
+        target.postMessage(msg, this.origin);
+      }
+    });
+  }
+
+  private handle(e: MessageEvent) {
+    const d: Envelope | null = typeof e.data === 'object' ? e.data : null;
+    if (d?.tredespace !== TREDESPACE_PROTOCOL || typeof d.type !== 'string') {
+      return;
+    }
+    const relay = e.source ? this.relays.get(e.source) : undefined;
+    if (relay) {
+      if (e.origin === relay.origin) {
+        this.fromRelayed(relay, d);
+      }
+      return;
+    }
+    if (this.origin !== '*' && e.origin !== this.origin) {
+      return;
+    }
+    if (d.type === 'client.hello') {
+      return; // a client that targets this page — relayed only once passed to relay()
+    }
+    if (d.type === 'client.bye') {
+      if (e.source === this.target) {
+        this.close('relay');
+      }
+      return;
+    }
+    if (d.type === 'app.ready') {
+      const ready = d.payload as AppReady;
+      this.readyPayload = ready;
+      const waiters = this.readyWaiters;
+      this.readyWaiters = [];
+      for (const w of waiters) {
+        if (w.timer) {
+          clearTimeout(w.timer);
+        }
+        w.resolve(ready);
+      }
+      // a fresh viewer (boot, reload, bfcache) knows nothing about this
+      // client: tell it which events to send — an empty list silences all but app.*
+      this.subscribeWire([...this.wireTypes]);
+      this.emit('app.ready', d.payload);
+      this.fanOut(d);
+      return;
+    }
+    if (d.type === 'app.bye') {
+      // the viewer is unloading: nothing in flight will be answered, and the
+      // next app.ready (reload / bfcache return) must be waited for again
+      this.readyPayload = null;
+      for (const [, p] of this.pending) {
+        clearTimeout(p.timer);
+        p.settle({ error: { code: 'transport', msg: 'viewer went away (app.bye)' } });
+      }
+      this.pending.clear();
+      this.emit('app.bye', d.payload);
+      this.fanOut(d);
+      return;
+    }
+    if (!d.id) {
+      // unsolicited app → host event (id: null), e.g. tree.select
+      this.emit(d.type, d.payload);
+      this.fanOut(d);
+      return;
+    }
+    const relayed = this.relayed.get(d.id);
+    if (relayed) {
+      clearTimeout(relayed.timer);
+      this.relayed.delete(d.id);
+      this.post(relayed.win, relayed.origin, d, true);
+      return;
+    }
+    const p = this.pending.get(d.id);
+    if (!p) {
+      return;
+    }
+    this.pending.delete(d.id);
+    clearTimeout(p.timer);
+    if (d.ok) {
+      p.settle({ data: d.payload });
+    } else {
+      const wire = d.error ?? { code: 'internal' as const, message: 'unknown error' };
+      p.settle({ error: { code: wire.code, msg: wire.message, err: wire } });
+    }
+  }
+
+  /** A message from a relayed window: its client's hello / bye notes are
+   *  answered here; a command is forwarded to the viewer under its own id,
+   *  remembered so the result finds its way back. */
+  private fromRelayed(relay: RelayEntry, d: Envelope) {
+    if (d.type === 'client.hello') {
+      this.emit('relay.changed', { window: relay.win, origin: relay.origin, state: 'connected' });
+      if (this.readyPayload) {
+        this.post(relay.win, relay.origin, this.readyEnvelope());
+      }
+      return;
+    }
+    if (d.type === 'client.bye') {
+      this.emit('relay.changed', { window: relay.win, origin: relay.origin, state: 'disconnected' });
+      return;
+    }
+    const id = d.id;
+    if (typeof id !== 'string' || d.type?.endsWith(':result') || d.type === 'app.ready' || !this.target) {
+      return;
+    }
+    const timer = setTimeout(() => this.relayed.delete(id), this.importTimeoutMs);
+    this.relayed.set(id, { win: relay.win, origin: relay.origin, timer });
+    this.post(this.target, this.origin, d, true);
+  }
+
+  private endRelay(win: Window, state: 'closed' | null) {
+    const relay = this.relays.get(win);
+    if (!relay) {
+      return;
+    }
+    this.relays.delete(win);
+    for (const [id, r] of this.relayed) {
+      if (r.win === win) {
+        clearTimeout(r.timer);
+        this.relayed.delete(id);
+      }
+    }
+    if (state) {
+      this.emit('relay.changed', { window: win, origin: relay.origin, state });
+    } else {
+      this.post(win, relay.origin, this.note('client.bye'));
+    }
+    if (!this.relays.size && !this.watchTarget) {
+      this.stopWatch();
+    }
+  }
+
+  /** End this client: settle what is pending, tell relayed windows (their
+   *  clients close with reason \`relay\`), tell an upstream relay when disposing
+   *  (it marks this window \`disconnected\`), then raise \`client.closed\`. */
+  private close(reason: ClientClosedEvent['reason']) {
+    if (this.isClosed) {
+      return;
+    }
+    this.isClosed = true;
+    window.removeEventListener('message', this.onMessage);
+    window.removeEventListener('pagehide', this.onPageHide);
+    window.removeEventListener('pageshow', this.onPageShow);
+    this.stopWatch();
+    const msg = CLOSE_MESSAGES[reason];
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.settle({ error: { code: 'transport', msg } });
+    }
+    this.pending.clear();
+    for (const r of this.relayed.values()) {
+      clearTimeout(r.timer);
+    }
+    this.relayed.clear();
+    for (const r of this.relays.values()) {
+      this.post(r.win, r.origin, this.note('client.bye'));
+    }
+    this.relays.clear();
+    if (reason === 'disposed') {
+      this.post(this.target, this.origin, this.note('client.bye'));
+    }
+    this.target = null;
+    const waiters = this.readyWaiters;
+    this.readyWaiters = [];
+    for (const w of waiters) {
+      if (w.timer) {
+        clearTimeout(w.timer);
+      }
+      w.reject(new TredespaceClientError('transport', \`\${msg} before app.ready\`));
+    }
+    this.emit('client.closed', { reason });
+  }
+
+  /** Ask the viewer for these event types (see {@link eventsSubscribe}); the
+   *  result is of no interest — an older viewer answers with an error and
+   *  keeps sending everything. */
+  private subscribeWire(events: string[]): void {
+    void this.eventsSubscribe(events);
+  }
+
+  private sayHello() {
+    this.post(this.target, this.origin, this.note('client.hello'));
+  }
+
+  /** Page unloading (navigation or close): an upstream relay marks this
+   *  window \`disconnected\`; relayed windows lose their link. */
+  private sayBye() {
+    this.post(this.target, this.origin, this.note('client.bye'));
+    for (const r of this.relays.values()) {
+      this.post(r.win, r.origin, this.note('client.bye'));
+    }
+  }
+
+  /** A client-to-relay note: \`id: null\` like an event, so the viewer — which
+   *  only answers string ids — ignores it when a client targets it directly. */
+  private note(type: 'client.hello' | 'client.bye'): Envelope {
+    return { tredespace: TREDESPACE_PROTOCOL, id: null, type, payload: {} };
+  }
+
+  private readyEnvelope(): Envelope {
+    return { tredespace: TREDESPACE_PROTOCOL, id: null, type: 'app.ready', ok: true, payload: this.readyPayload };
+  }
+
+  /** Every unsolicited message from the viewer goes to every relayed window
+   *  as well — cloned, never transferred, since there may be several. */
+  private fanOut(d: Envelope) {
+    for (const r of this.relays.values()) {
+      this.post(r.win, r.origin, d);
+    }
+  }
+
+  private post(win: Window | null, origin: string, d: Envelope, transfer = false) {
+    if (!win) {
+      return;
+    }
+    try {
+      win.postMessage(d, origin, transfer ? transferablesOf(d) : []);
+    } catch {
+      // closed window or an already-detached buffer — the sender's timeout reports it
+    }
+  }
+
+  private emit(type: string, payload: unknown) {
+    const handlers = this.eventHandlers.get(type);
+    if (!handlers) {
+      return;
+    }
+    for (const h of [...handlers]) {
+      h(payload);
+    }
+  }
+
+  private startWatch() {
+    if (this.watchTimer) {
+      return;
+    }
+    this.watchTimer = setInterval(() => this.checkClosed(), CLOSED_POLL_MS);
+  }
+
+  private stopWatch() {
+    if (!this.watchTimer) {
+      return;
+    }
+    clearInterval(this.watchTimer);
+    this.watchTimer = null;
+  }
+
+  private checkClosed() {
+    for (const r of [...this.relays.values()]) {
+      if (r.win.closed) {
+        this.endRelay(r.win, 'closed');
+      }
+    }
+    if (this.watchTarget && this.target?.closed) {
+      this.close('target');
+    }
+  }
+}
+`,t={protocol:`1`,generatedFrom:`api/tredespace-client.ts`,groups:[{ns:`client`,methods:[{name:`ready`,command:null,suspect:null,signature:`ready(opts: { timeoutMs?: number } = {}): Promise<AppReady>`,doc:`Resolves once the viewer has announced app.ready (queues until then).
+With \`timeoutMs\` it rejects — a TredespaceClientError, code
+\`timeout\` — when no app.ready arrives in time: the viewer is not there,
+or this page's origin is not on its allowlist (which it never reports).
+It also rejects (code \`transport\`) when the client is disposed or its
+target window closes before ready. Without a timeout it waits for as
+long as the client lives.`,example:null,sample:null},{name:`supports`,command:null,suspect:null,signature:`supports(name: string): boolean`,doc:"Whether this viewer has a command (`'sql.execute'`) or posts an event\n(`'tree.select'`), from the `app.ready` payload — so `false` until\nready has resolved. Feature-detect before calling something a\nnewer viewer added; an unsupported command answers `unknown-command`.",example:null,sample:null},{name:`dispose`,command:null,suspect:null,signature:`dispose(): void`,doc:"Detach the message listener and settle every in-flight request with a\n`transport` error. Call when the host tears down the iframe. Ends every\nrelay this client runs (their windows' clients close with reason\n`relay`) and raises the local `client.closed` event with reason\n`disposed`.",example:null,sample:null},{name:`relay`,command:null,suspect:null,signature:`relay(win: Window, opts: RelayOptions): () => void`,doc:"Forward the postMessage API for a window this page opened (`window.open`)\n— its page drives THIS page with an unchanged client\n(`new TredespaceClient(window.opener, { targetOrigin })`) and every\ncommand, result, event and `app.ready` passes through here to the\nviewer and back. Bytes are re-transferred, everything else is\nstructured-cloned once more per hop. The window gets exactly this\nclient's API rights, so `origin` is mandatory and never `'*'`. Works\nthe same from a page inside the viewer (its client targets\n`window.parent`), and a relayed window's client can relay again to\nwindows it opens. Returns a function that ends the relay (so does\n`{ signal }` and `dispose()`), which closes the window's client; a\nwindow that closes drops its relay by itself. Watch it with\n`onRelayChanged`.",example:null,sample:null},{name:`colorApplyList`,command:null,suspect:null,signature:`colorApplyList(
+  list: ArrayBuffer,
+  opts?: {
+    mode?: ColorMode;
+  }
+): Promise<Result<NameListResult & {
+  mode: string;
+}>>`,doc:`The old name of colorRulesApplyList — same call, kept so existing
+hosts keep working.`,example:null,sample:null},{name:`onViewpointsBookmark`,command:null,suspect:null,signature:`onViewpointsBookmark(
+  handler: (e: ViewpointsBookmarkEvent) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:"Subscribe to the bookmark-button click event (see\n`viewpointsSetBookmarkButton`). Returns an unsubscribe function.",example:null,sample:null},{name:`on`,command:null,suspect:null,signature:`on(
+  type: K,
+  handler: (payload: TredespaceEventMap[K]) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:"Subscribe to a viewer event, or one of the client's own — typed by\nname through TredespaceEventMap; a name not in the map gets\n`unknown`. The first handler for a viewer event type also tells the\nviewer to send it (`events.subscribe`): the viewer posts a client only\nwhat it listens for, and re-learns the list after every `app.ready`.\nReturns the unsubscribe; aborting `signal` does the same.",example:null,sample:null},{name:`once`,command:null,suspect:null,signature:`once(
+  type: K,
+  opts?: {
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }
+): Promise<TredespaceEventMap[K]>`,doc:"The next event of a type as a promise — `await client.once('tree.select')`.\nRejects with a TredespaceClientError after `timeoutMs`, when\n`signal` aborts, or when the client closes first.",example:null,sample:null},{name:`onTreeSelect`,command:null,suspect:null,signature:`onTreeSelect(
+  handler: (e: TreeSelectEvent) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:`Typed convenience for the tree-click event.`,example:null,sample:null},{name:`onClientsChanged`,command:null,suspect:null,signature:`onClientsChanged(
+  handler: (e: ClientsChangedEvent) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:`Presence on the bus: fires for subscribers whenever a client joins,
+leaves, renames or disconnects, with the full list. Subscribe with
+\`events: []\` to get only this.`,example:null,sample:null},{name:`onThemeChanged`,command:null,suspect:null,signature:`onThemeChanged(
+  handler: (e: {
+    theme: 'dark' | 'light';
+  }) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:`Typed convenience for viewer theme changes — fired whichever way the
+theme switched (Settings tab, hotkey, \`uiTheme\`, or another tab syncing
+its settings over), so a host page and every embedded app can restyle in
+step with the viewer.`,example:null,sample:null},{name:`onInstanceChanged`,command:null,suspect:null,signature:`onInstanceChanged(
+  handler: (e: {
+    data: Record<string, unknown>;
+  }) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:`Typed convenience for instance-data changes (any dialog called instance.set).`,example:null,sample:null},{name:`onClosed`,command:null,suspect:null,signature:`onClosed(
+  handler: (e: ClientClosedEvent) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:"Typed convenience for the local `client.closed` event: this client's link\nended — `dispose()` / the constructor signal (`disposed`), the opener\nrelaying for it went away (`relay`), or its target window was found\nclosed (`target`). Fires once, after pending requests were settled with\na `transport` error; nothing follows it.",example:null,sample:null},{name:`onAppBye`,command:null,suspect:null,signature:`onAppBye(
+  handler: (e: AppByeEvent) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:'The viewer is going away — reload, navigation, its tab closing, or\ninto the back-forward cache. Opt-in: only pages that subscribe hear it.\nBefore it fires, every in-flight request has been settled with a\n`transport` error and `ready()` is armed again, so `await ready()` waits\nfor the next `app.ready` (a reloaded iframe comes back on the same\nclient — this is NOT `client.closed`). Show "not connected" here and\nput things back in onAppReady.',example:null,sample:null},{name:`onAppReady`,command:null,suspect:null,signature:`onAppReady(
+  handler: (e: AppReady) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:"Every `app.ready` — the first boot and each one after an `app.bye`\n(reload, back from the back-forward cache). The place to (re)do what a\nfresh viewer has forgotten: subscribe to the bus again (every page gets\na new client id), set instance data, register host apps. `ready()`\nresolves the same payload for code that only needs the first one.",example:null,sample:null},{name:`onAppError`,command:null,suspect:null,signature:`onAppError(
+  handler: (e: AppErrorEvent) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:"`app.error`: the viewport failed — WebGPU did not initialise, the device\nwas lost, or a recovery failed. The API keeps working (SQL, assets, the\nbus); only rendering is gone until the user reloads. `ready()` still\nresolves, so a page that connects late checks appInfo's `gpu`\ninstead.",example:null,sample:null},{name:`onRelayChanged`,command:null,suspect:null,signature:`onRelayChanged(
+  handler: (e: RelayChangedEvent) => void,
+  opts?: SubscribeOptions
+): () => void`,doc:"Typed convenience for the local `relay.changed` event — per window passed\nto `relay()`: `connected` when its page's client says hello (again after\neach navigation), `disconnected` when that client disposes or the page\nunloads (the relay stays — it may be navigating), `closed` when the\nwindow is gone and the relay was dropped.",example:null,sample:null},{name:`onDialogChanged`,command:null,suspect:null,signature:`onDialogChanged(
+  handler: (e: DialogChangedEvent) => void,
+  opts?: DialogSubscribeOptions
+): () => void`,doc:"Typed convenience for external-dialog lifecycle changes — opened, hidden,\nshown, renamed, closed — whichever route caused them (the ✕, `uiClose`,\nthe `uiDialog*` methods, `externalAppsSet`, a layout swap dropping a\npanel). Fires for EVERY external dialog and panel in the viewer: a host\ntracking them all calls `uiDialogs` for the current\nset and keeps it current with this. A page running INSIDE a dialog passes\n`{ self: true }` to hear about its own dialog only — matched against the\n`?tdsDialogId=` on the page's URL (nothing is delivered when the URL has\nnone, i.e. the page is not hosted in a viewer dialog).",example:null,sample:null},{name:`onDialogClosing`,command:null,suspect:null,signature:`onDialogClosing(
+  handler: (e: DialogChangedEvent) => unknown,
+  opts?: DialogClosingOptions
+): () => void`,doc:`Run code before the dialog / panel hosting THIS page is unmounted — the
+✕, \`uiClose\`, \`uiDialogClose\`, whichever route. Subscribing asks the
+viewer to hold the close: the dialog / tab disappears at once, but the
+page stays mounted (hidden) until every handler has run — a returned
+promise (any promise, e.g. straight from \`instanceSet\`) is awaited — or
+\`timeoutMs\` passes (default 3000, max 10000);
+then it is unmounted. Save state, tell your backend, close what you
+opened. Not for layout swaps: those unmount immediately, so keep
+persisting as you go (EVENTS.md, "Dialog identity and state"). Only from
+a page INSIDE a viewer dialog or panel. The returned function
+unsubscribes and, with the last handler gone, lifts the hold.`,example:null,sample:null}]},{ns:`app`,methods:[{name:`appInfo`,command:`app.info`,suspect:null,signature:`appInfo(): Promise<Result<AppReady>>`,doc:"The `app.ready` payload on demand: version, protocol, the command and\nevent lists and the CURRENT GPU state (`app.ready` itself usually says\n`booting`, this says how the viewport boot went).",example:`payload:  {}
+response: { version: '0.0.118', api: 1,
+            commands: ['app.info', 'assets.import', '…'],
+            events: ['app.ready', 'tree.select', '…'],
+            gpu: 'ok' }`,sample:`const res = await client.appInfo();
+// res.data →
+{ version: '0.0.118', api: 1,
+            commands: ['app.info', 'assets.import', '…'],
+            events: ['app.ready', 'tree.select', '…'],
+            gpu: 'ok' }`}]},{ns:`events`,methods:[{name:`eventsSubscribe`,command:`events.subscribe`,suspect:null,signature:`eventsSubscribe(
+  events: string[]
+): Promise<Result<{
+  events: string[];
+  unknown: string[];
+}>>`,doc:'Tell the viewer which events to send this client. on does this\nfor you, so call it only from a hand-rolled event path. Adds to the\ncurrent subscription: the first call turns "everything" into "exactly\nthese" (`[]` keeps only `app.*`, which always arrives). Unknown names\ncome back in `unknown`, not as an error.',example:`payload:  { events: ['tree.select', 'sql.execute:progress', 'nope'] }
+response: { events: ['sql.execute:progress', 'tree.select'], unknown: ['nope'] }`,sample:`const res = await client.eventsSubscribe(['tree.select', 'sql.execute:progress', 'nope']);
+// res.data →
+{ events: ['sql.execute:progress', 'tree.select'], unknown: ['nope'] }`}]},{ns:`selection`,methods:[{name:`selectionSet`,command:`selection.set`,suspect:null,signature:`selectionSet(
+  fullnames: string[],
+  opts?: {
+    append?: boolean;
+  }
+): Promise<Result<SelectionSetResult>>`,doc:"Replace the selection by fullname (reveals the first hit in the tree).\nA name resolves in EVERY loaded model that carries it — the same\nstructure loaded twice selects both copies, as colouring the same list\nwould — so `matched` counts selected entries and can exceed the number of\nnames sent. `append: true` keeps what is already selected and adds to it\ninstead. `missed` lists fullnames that resolved to nothing.",example:`payload:  { fullnames: ['/TP400-PIPE-01', '/TP400-PIPE-02'], append: false }
+response: { matched: 2, missed: [] }
+// the same two names with that structure loaded twice:
+response: { matched: 4, missed: [] }`,sample:`const res = await client.selectionSet(['/TP400-PIPE-01', '/TP400-PIPE-02'], { append: false });
+// res.data →
+{ matched: 2, missed: [] }
+// the same two names with that structure loaded twice:
+response: { matched: 4, missed: [] }`},{name:`selectionSetList`,command:`selection.setList`,suspect:null,signature:`selectionSetList(
+  list: ArrayBuffer,
+  opts?: {
+    append?: boolean;
+  }
+): Promise<Result<SelectionListResult>>`,doc:`Select a LARGE fullname list: build it with encodeNameList and
+it travels as one transferred buffer, packed straight into the model DB —
+no per-row JSON on either side. \`append\` adds to the current selection.
+As with selectionSet, a name resolves in every loaded model that
+carries it, so \`matched\` counts entries and \`missed\` counts names that
+resolved nowhere. For a handful of names selectionSet is
+simpler.`,example:`payload:  { append: false }        // + bytes: ArrayBuffer of "/PIPE-01\\n/PIPE-02\\n…"
+response: { names: 240000, matched: 239812, missed: 188 }`,sample:`const res = await client.selectionSetList(…, { append: false });
+// res.data →
+{ names: 240000, matched: 239812, missed: 188 }`},{name:`selectionClear`,command:`selection.clear`,suspect:null,signature:`selectionClear(): Promise<Result<Record<string, never>>>`,doc:`Clear the current selection.`,example:`payload:  {}
+response: {}`,sample:`const res = await client.selectionClear();
+// res.data →
+{}`},{name:`selectionGet`,command:`selection.get`,suspect:null,signature:`selectionGet(
+  opts: SelectionGetOptions = {
+
+  }
+): Promise<Result<SelectionGetResult>>`,doc:"Read the current selection: the count, the selection roots as\nfullnames, and with `{ items: true }` every selected node — grouping\nentries and leaves, children included, minus `skip` prefixes, capped at\n`maxItems` — the form to use after invert / API / SQL selections, which\nhave no tree roots. `{ parents: true }` adds every ancestor of the\nselection, each fullname once, so a host can resolve tags carried by a\nlevel above what was selected.",example:`payload:  {}
+response: { count: 3, fullnames: ['/TP400-BEAM-01'] }            // selection roots
+
+payload:  { items: true, skip: ['FRAME', 'BRACKET*', 'TEMPLATE'], maxItems: 50000 }
+response: { count: 3, fullnames: ['/TP400-BEAM-01'],
+            items: ['/TP400-BEAM-01', '/TP400-PLATE-01', '/TP400-PLATE-02'],
+            itemCount: 3 }                                          // truncated: true when capped
+
+payload:  { parents: true }
+response: { count: 3, fullnames: ['/SITE/AREA-1/LINE-01/PIPE-01'],
+            parents: ['/SITE/AREA-1/LINE-01', '/SITE/AREA-1', '/SITE',   // each once, root-less selections too
+                      'plant', 'plant/area-1'] }                          // the model's import folders, cumulative`,sample:`const res = await client.selectionGet(…);
+// res.data →
+{ count: 3, fullnames: ['/TP400-BEAM-01'] }            // selection roots
+
+payload:  { items: true, skip: ['FRAME', 'BRACKET*', 'TEMPLATE'], maxItems: 50000 }
+response: { count: 3, fullnames: ['/TP400-BEAM-01'],
+            items: ['/TP400-BEAM-01', '/TP400-PLATE-01', '/TP400-PLATE-02'],
+            itemCount: 3 }                                          // truncated: true when capped
+
+payload:  { parents: true }
+response: { count: 3, fullnames: ['/SITE/AREA-1/LINE-01/PIPE-01'],
+            parents: ['/SITE/AREA-1/LINE-01', '/SITE/AREA-1', '/SITE',   // each once, root-less selections too
+                      'plant', 'plant/area-1'] }                          // the model's import folders, cumulative`}]},{ns:`labels`,methods:[{name:`labelsSet`,command:`labels.set`,suspect:null,signature:`labelsSet(labels: LabelInput[]): Promise<Result<LabelsResult>>`,doc:"Replace all scene labels. Each label anchors either to a world-space\n`anchor` point or to a `fullname` (the item's bounds centre, or the\nnearest child item with `snap: true`); `missed` lists fullnames that\nresolved to nothing. Colours (`bg`, `textColor`, `leaderColor`),\n`opacity` and the leader-line `offset` are per label — each omitted one\nfalls back to the Labels panel's current style.",example:`payload: { labels: [
+  { text: 'Check **this** flange', fullname: '/TP400-PIPE-01', snap: true,
+    bg: '#fff3c4', textColor: '#14161a', opacity: 0.9,
+    offset: [80, -60], leaderColor: '#c026d3' },   // sits up-right of the anchor, leader line drawn
+  { text: 'Hand note', anchor: [12.5, 3.2, 8.0], sphere: { size: 0.2, color: '#ff8800', solid: true, opacity: 0.6 } },
+] }
+response: { added: 2, missed: [] }   // missed = unresolvable fullnames`,sample:`const res = await client.labelsSet([
+  { text: 'Check **this** flange', fullname: '/TP400-PIPE-01', snap: true,
+    bg: '#fff3c4', textColor: '#14161a', opacity: 0.9,
+    offset: [80, -60], leaderColor: '#c026d3' },
+  { text: 'Hand note', anchor: [12.5, 3.2, 8.0], sphere: { size: 0.2, color: '#ff8800', solid: true, opacity: 0.6 } },
+]);
+// res.data →
+{ added: 2, missed: [] }   // missed = unresolvable fullnames`},{name:`labelsAdd`,command:`labels.add`,suspect:null,signature:`labelsAdd(labels: LabelInput[]): Promise<Result<LabelsResult>>`,doc:`Append scene labels (same anchor forms as labelsSet).`,example:`payload: { labels: [
+  { text: 'Check **this** flange', fullname: '/TP400-PIPE-01', snap: true,
+    bg: '#fff3c4', textColor: '#14161a', opacity: 0.9,
+    offset: [80, -60], leaderColor: '#c026d3' },   // sits up-right of the anchor, leader line drawn
+  { text: 'Hand note', anchor: [12.5, 3.2, 8.0], sphere: { size: 0.2, color: '#ff8800', solid: true, opacity: 0.6 } },
+] }
+response: { added: 2, missed: [] }   // missed = unresolvable fullnames`,sample:`const res = await client.labelsAdd([
+  { text: 'Check **this** flange', fullname: '/TP400-PIPE-01', snap: true,
+    bg: '#fff3c4', textColor: '#14161a', opacity: 0.9,
+    offset: [80, -60], leaderColor: '#c026d3' },
+  { text: 'Hand note', anchor: [12.5, 3.2, 8.0], sphere: { size: 0.2, color: '#ff8800', solid: true, opacity: 0.6 } },
+]);
+// res.data →
+{ added: 2, missed: [] }   // missed = unresolvable fullnames`},{name:`labelsClear`,command:`labels.clear`,suspect:null,signature:`labelsClear(): Promise<Result<Record<string, never>>>`,doc:`Remove every scene label.`,example:`payload:  {}
+response: {}`,sample:`const res = await client.labelsClear();
+// res.data →
+{}`},{name:`labelsGet`,command:`labels.get`,suspect:null,signature:`labelsGet(): Promise<Result<{ labels: LabelInfo[] }>>`,doc:`Every scene label as the Labels panel holds it — the labelsSet
+fields plus id, style, the dragged offset and the sphere marker — so a
+host can store and later restore or diff them.`,example:`payload:  {}
+response: { labels: [
+  { id: 3, text: 'Hand note', fullname: null, anchor: [12.5, 3.2, 8.0], offset: [0, 0],
+    bg: '#ffffff', opacity: 1, textColor: '#14161a', leaderColor: null,
+    sphere: { size: 0.2, color: '#ff8800', solid: true, opacity: 0.6 }, muted: false } ] }`,sample:`const res = await client.labelsGet();
+// res.data →
+{ labels: [
+  { id: 3, text: 'Hand note', fullname: null, anchor: [12.5, 3.2, 8.0], offset: [0, 0],
+    bg: '#ffffff', opacity: 1, textColor: '#14161a', leaderColor: null,
+    sphere: { size: 0.2, color: '#ff8800', solid: true, opacity: 0.6 }, muted: false } ] }`},{name:`labelsExplode`,command:`labels.explode`,suspect:null,signature:`labelsExplode(): Promise<Result<Record<string, never>>>`,doc:`Spread overlapping labels apart from their anchors (the in-app explode).`,example:`payload:  {}
+response: {}`,sample:`const res = await client.labelsExplode();
+// res.data →
+{}`},{name:`labelsImplode`,command:`labels.implode`,suspect:null,signature:`labelsImplode(): Promise<Result<Record<string, never>>>`,doc:`Pull exploded labels back onto their anchor points.`,example:`payload:  {}
+response: {}`,sample:`const res = await client.labelsImplode();
+// res.data →
+{}`}]},{ns:`measurements`,methods:[{name:`measurementsSet`,command:`measurements.set`,suspect:null,signature:`measurementsSet(
+  measurements: MeasurementInput[]
+): Promise<Result<{
+  added: number;
+}>>`,doc:`Replace all measurements (world-space points; same shape as the
+measurements JSON export).`,example:`payload: { measurements: [
+  { kind: 'line', points: [{ pos: [0,0,0] }, { pos: [0,0,2.5] }],
+    label: '**Riser**\\nfield check', sphere: { size: 0.1, color: '#ff8800' } },
+] }
+response: { added: 1 }`,sample:`const res = await client.measurementsSet([
+  { kind: 'line', points: [{ pos: [0,0,0] }, { pos: [0,0,2.5] }],
+    label: '**Riser**\\nfield check', sphere: { size: 0.1, color: '#ff8800' } },
+]);
+// res.data →
+{ added: 1 }`},{name:`measurementsAdd`,command:`measurements.add`,suspect:null,signature:`measurementsAdd(
+  measurements: MeasurementInput[]
+): Promise<Result<{
+  added: number;
+}>>`,doc:`Append measurements (same shape as measurementsSet).`,example:`payload: { measurements: [
+  { kind: 'line', points: [{ pos: [0,0,0] }, { pos: [0,0,2.5] }],
+    label: '**Riser**\\nfield check', sphere: { size: 0.1, color: '#ff8800' } },
+] }
+response: { added: 1 }`,sample:`const res = await client.measurementsAdd([
+  { kind: 'line', points: [{ pos: [0,0,0] }, { pos: [0,0,2.5] }],
+    label: '**Riser**\\nfield check', sphere: { size: 0.1, color: '#ff8800' } },
+]);
+// res.data →
+{ added: 1 }`},{name:`measurementsClear`,command:`measurements.clear`,suspect:null,signature:`measurementsClear(): Promise<Result<Record<string, never>>>`,doc:`Remove every measurement.`,example:`payload:  {}
+response: {}`,sample:`const res = await client.measurementsClear();
+// res.data →
+{}`}]},{ns:`colorRules`,methods:[{name:`colorRulesApply`,command:`colorRules.apply`,suspect:null,signature:`colorRulesApply(
+  rules: ColorRuleInput[],
+  opts?: {
+    mode?: 'reset' | 'append' | 'hide';
+  }
+): Promise<Result<{
+  ran: boolean;
+  matches: number[];
+}>>`,doc:`Run a rule set DIRECTLY, without touching the Set Color panel — same
+rule shape as colorRulesSet, but the panel's own rules/mode stay
+as they are (nothing to clean up afterwards). \`mode\` defaults to
+'reset'; disabled rules are skipped. Returns per-enabled-rule match
+counts.`,example:`payload: { mode: 'reset', rules: [
+  { color: '#ff8800', filters: [{ op: 'append', mode: 'contains', value: 'PIPE' }] },
+] }
+response: { ran: true, matches: [192308] }`,sample:`const res = await client.colorRulesApply([
+  { color: '#ff8800', filters: [{ op: 'append', mode: 'contains', value: 'PIPE' }] },
+], { mode: 'reset' });
+// res.data →
+{ ran: true, matches: [192308] }`},{name:`colorRulesSet`,command:`colorRules.set`,suspect:null,signature:`colorRulesSet(
+  rules: ColorRuleInput[],
+  opts?: {
+    mode?: 'reset' | 'append' | 'hide' | 'keep';
+    run?: boolean;
+    replaceRules?: boolean;
+  }
+): Promise<Result<ColorRulesResult>>`,doc:"Replace the Set-Color rules — or, with `replaceRules:false`, append to\nthe ones already there (like colorRulesAdd). `mode` is the run\nmode the panel keeps: 'reset' (default) clears existing overrides before\npainting, 'append' layers on top, 'hide' hides everything the rules do\nnot match, and 'keep' leaves whatever the panel has (a fresh panel's is\n'reset') — so `{ replaceRules: false, mode: 'keep' }` adds rules without\ndisturbing a user's own set-up. `run:true` applies them immediately.",example:`payload: { mode: 'append', run: true, replaceRules: true, // false = add to the rules already there
+  rules: [
+  { comment: 'inspection', enabled: true, color: '#ff8800', opacity: 1, store: 'main',
+    filters: [{ op: 'append', mode: 'contains', value: 'PIPE', comment: '', level: 3 }] },
+  { comment: 'per-row colours', color: null,
+    filters: [{ op: 'append', mode: 'multi', value: '/TP400-PIPE-01\\tred\\n/TP400-PIPE-02\\t#00ff00:50' }] },
+] }
+response: { rules: 3, ran: true, matches: [192308, 2] }`,sample:`const res = await client.colorRulesSet([
+  { comment: 'inspection', enabled: true, color: '#ff8800', opacity: 1, store: 'main',
+    filters: [{ op: 'append', mode: 'contains', value: 'PIPE', comment: '', level: 3 }] },
+  { comment: 'per-row colours', color: null,
+    filters: [{ op: 'append', mode: 'multi', value: '/TP400-PIPE-01\\tred\\n/TP400-PIPE-02\\t#00ff00:50' }] },
+], { mode: 'append', run: true, replaceRules: true });
+// res.data →
+{ rules: 3, ran: true, matches: [192308, 2] }`},{name:`colorRulesAdd`,command:`colorRules.add`,suspect:null,signature:`colorRulesAdd(
+  rules: ColorRuleInput[],
+  opts?: {
+    run?: boolean;
+  }
+): Promise<Result<ColorRulesResult>>`,doc:"Append Set-Color rules; `run:true` applies them immediately.",example:`payload: { mode: 'append', run: true, replaceRules: true, // false = add to the rules already there
+  rules: [
+  { comment: 'inspection', enabled: true, color: '#ff8800', opacity: 1, store: 'main',
+    filters: [{ op: 'append', mode: 'contains', value: 'PIPE', comment: '', level: 3 }] },
+  { comment: 'per-row colours', color: null,
+    filters: [{ op: 'append', mode: 'multi', value: '/TP400-PIPE-01\\tred\\n/TP400-PIPE-02\\t#00ff00:50' }] },
+] }
+response: { rules: 3, ran: true, matches: [192308, 2] }`,sample:`const res = await client.colorRulesAdd([
+  { comment: 'inspection', enabled: true, color: '#ff8800', opacity: 1, store: 'main',
+    filters: [{ op: 'append', mode: 'contains', value: 'PIPE', comment: '', level: 3 }] },
+  { comment: 'per-row colours', color: null,
+    filters: [{ op: 'append', mode: 'multi', value: '/TP400-PIPE-01\\tred\\n/TP400-PIPE-02\\t#00ff00:50' }] },
+], { mode: 'append', run: true, replaceRules: true });
+// res.data →
+{ rules: 3, ran: true, matches: [192308, 2] }`},{name:`colorRulesApplyList`,command:`colorRules.applyList`,suspect:null,signature:`colorRulesApplyList(
+  list: ArrayBuffer,
+  opts?: {
+    mode?: ColorMode;
+  }
+): Promise<Result<NameListResult & {
+  mode: string;
+}>>`,doc:`Colour a LARGE fullname list you computed yourself: build it with
+encodeNameList (per-name colours optional) and it travels as one
+transferred buffer, packed viewer-side. \`mode\` is the same
+ColorMode sqlColor takes — including
+\`{ type: 'custom-color', base: 'none' }\` to paint the list over the model
+as it is. Names carrying no colour of their own get the mode's colour
+(yellow by default).`,example:`payload:  { mode: { type: 'custom-color', color: 'orange', base: 'transparent', baseOpacity: 0.1 } }
+          // + bytes: ArrayBuffer of "/PIPE-01\\tyellow\\n/PIPE-02\\t#ff0000:50\\n…"
+response: { mode: 'custom-color', names: 240000 }`,sample:`const res = await client.colorRulesApplyList(…, { mode: { type: 'custom-color', color: 'orange', base: 'transparent', baseOpacity: 0.1 } });
+// res.data →
+{ mode: 'custom-color', names: 240000 }`},{name:`colorRulesRun`,command:`colorRules.run`,suspect:null,signature:`colorRulesRun(): Promise<Result<{ matches: number[] }>>`,doc:`Re-run the current rules against the model; returns matched item counts.`,example:`payload:  {}
+response: { matches: [12, 90] }   // run; clear responds {}`,sample:`const res = await client.colorRulesRun();
+// res.data →
+{ matches: [12, 90] }   // run; clear responds {}`},{name:`colorRulesClear`,command:`colorRules.clear`,suspect:null,signature:`colorRulesClear(): Promise<Result<Record<string, never>>>`,doc:`Remove all Set-Color rules. Does NOT restore already-painted colors — use
+colorRulesResetModel for that.`,example:`payload:  {}
+response: { matches: [12, 90] }   // run; clear responds {}`,sample:`const res = await client.colorRulesClear();
+// res.data →
+{ matches: [12, 90] }   // run; clear responds {}`},{name:`colorRulesResetModel`,command:`colorRules.resetModel`,suspect:null,signature:`colorRulesResetModel(): Promise<Result<Record<string, never>>>`,doc:`Reset the model's color/opacity overrides (the in-app Alt+R action).`,example:`payload:  {}
+response: {}`,sample:`const res = await client.colorRulesResetModel();
+// res.data →
+{}`}]},{ns:`colors`,methods:[{name:`colorsNames`,command:`colors.names`,suspect:null,signature:`colorsNames(): Promise<Result<{ names: Record<string, string> }>>`,doc:"Every colour NAME the viewer accepts wherever a colour token is read — a\nquery's `fullname_color`, a Multi rule row, a ColorMode's\n`color` — as `{ name: '#rrggbb' }`. Hex codes always work too; this is\nthe list for validating or offering names in your own UI.",example:`payload:  {}
+response: { names: { aliceblue: '#f0f8ff', antiquewhite: '#faebd7', /* … */ yellowgreen: '#9acd32' } }`,sample:`const res = await client.colorsNames();
+// res.data →
+{ names: { aliceblue: '#f0f8ff', antiquewhite: '#faebd7', /* … */ yellowgreen: '#9acd32' } }`}]},{ns:`model`,methods:[{name:`modelReset`,command:`model.reset`,suspect:null,signature:`modelReset(opts?: ModelResetOptions): Promise<Result<ModelResetResult>>`,doc:`Reset the model's overrides — colors, opacity overrides, hidden items and
+item transforms. Naming kinds resets ONLY those (\`{ hidden: true }\`
+unhides and leaves the colors alone); an empty payload resets all four.
+The response echoes which kinds were reset.`,example:`payload:  { color: true, opacity: true, hidden: true, transform: false }
+response: { color: true, opacity: true, hidden: true, transform: false }`,sample:`const res = await client.modelReset();
+// res.data →
+{ color: true, opacity: true, hidden: true, transform: false }`}]},{ns:`clip`,methods:[{name:`clipBoxGet`,command:`clip.box.get`,suspect:null,signature:`clipBoxGet(): Promise<Result<ClipBoxState>>`,doc:"The default clipping box: whether it is cutting, whether it is inverted,\nits world-space `min`/`max` (axis-aligned envelope — exact unless the box\nis rotated) plus the exact oriented box. Intersect `min`/`max` with your\nown asset bounds to decide which models to load.",example:`payload:  { }
+response: { enabled: true, inverted: false,
+            min: [-5, -5, -5], max: [5, 5, 5],
+            center: [0, 0, 0], size: [10, 10, 10], rotation: [0, 0, 0, 1] }`,sample:`const res = await client.clipBoxGet();
+// res.data →
+{ enabled: true, inverted: false,
+            min: [-5, -5, -5], max: [5, 5, 5],
+            center: [0, 0, 0], size: [10, 10, 10], rotation: [0, 0, 0, 1] }`},{name:`clipBoxFitSelected`,command:`clip.box.fitSelected`,suspect:null,signature:`clipBoxFitSelected(offset?: number): Promise<Result<{ offset: number }>>`,doc:"Fit the clip box to the current selection. `offset` adds a margin on every\nside for THIS call only (it doesn't change the panel's stored offset).",example:`payload:  { offset: 2 }        // or {} for a tight fit
+response: { offset: 2 }`,sample:`const res = await client.clipBoxFitSelected(2);
+// res.data →
+{ offset: 2 }`},{name:`clipShapesAdd`,command:`clip.shapes.add`,suspect:null,signature:`clipShapesAdd(shapes: ClipShapeInput[]): Promise<Result<{ added: number }>>`,doc:`Append clip shapes (sphere/cylinder/box). Returns how many were added.`,example:`payload:  { shapes: [ { kind: 'sphere', center: [0,0,0], radius: 5 } ] }
+response: { added: 1 }`,sample:`const res = await client.clipShapesAdd([ { kind: 'sphere', center: [0,0,0], radius: 5 } ]);
+// res.data →
+{ added: 1 }`},{name:`clipBoxDisable`,command:`clip.box.disable`,suspect:null,signature:`clipBoxDisable(): Promise<Result<Record<string, never>>>`,doc:`Turn box clipping off (leaves any clip shapes in place).`,example:`payload:  {}
+response: {}`,sample:`const res = await client.clipBoxDisable();
+// res.data →
+{}`},{name:`clipReset`,command:`clip.reset`,suspect:null,signature:`clipReset(): Promise<Result<Record<string, never>>>`,doc:`Full clip reset — disable the box AND remove every clip shape.`,example:`payload:  {}
+response: {}`,sample:`const res = await client.clipReset();
+// res.data →
+{}`}]},{ns:`nav`,methods:[{name:`navFlyTo`,command:`nav.flyTo`,suspect:null,signature:`navFlyTo(
+  fullname: string,
+  opts?: {
+    select?: boolean;
+    wait?: boolean;
+  }
+): Promise<Result<{
+  matched: boolean;
+}>>`,doc:"Fly the camera to a node by fullname. `select` also selects it (default\njust flies); `wait` responds only once the camera has ARRIVED, so a\nchained screenshot or command sees the final view. A name carried by\nseveral loaded models frames EVERY copy — the camera pulls back far\nenough to hold them all, like fit-selected on a multi-model selection.\n`matched` is false when the fullname isn't found.",example:`payload:  { fullname: '/SITE/ZONE-1/PIPE-401', select: false, wait: true }
+response: { matched: true }`,sample:`const res = await client.navFlyTo('/SITE/ZONE-1/PIPE-401', { select: false, wait: true });
+// res.data →
+{ matched: true }`},{name:`navOrbit`,command:`nav.orbit`,suspect:null,signature:`navOrbit(
+  fullname: string,
+  opts?: {
+    select?: boolean;
+    wait?: boolean;
+  }
+): Promise<Result<{
+  matched: boolean;
+}>>`,doc:"Set the orbit pivot to a node by fullname (camera stays); `select` also\nselects it, `wait` responds only once the re-pivot has landed. A name\ncarried by several loaded models pivots on the centre of all copies\ntogether, as navFlyTo frames them all. `matched` is false when the\nfullname isn't found.",example:`payload:  { fullname: '/SITE/ZONE-1/PIPE-401', select: false, wait: true }
+response: { matched: true }`,sample:`const res = await client.navOrbit('/SITE/ZONE-1/PIPE-401', { select: false, wait: true });
+// res.data →
+{ matched: true }`},{name:`navFitVisible`,command:`nav.fitVisible`,suspect:null,signature:`navFitVisible(
+  opts?: {
+    wait?: boolean;
+    bounds?: FitVisibleBounds;
+  }
+): Promise<Result<{
+  fitted: boolean;
+}>>`,doc:`Frame everything currently VISIBLE — every item that is not hidden (a
+leftover opacity-0 override counts as hidden too), moved geometry
+included —
+as tightly as the viewport allows, under the
+clipping in force: with the clip box / shapes on, the frame is the
+visible box cut down to their envelope (holes ignored), and every
+enabled clipping plane trims it. \`bounds: 'bbox'\` frames the clip
+volumes' envelope itself instead. \`wait\` responds only once the camera
+has arrived. \`fitted\` is false when nothing visible is left to frame.`,example:`payload:  { wait: true }
+response: { fitted: true }
+
+payload:  { bounds: 'bbox' }      // frame the clip box / shapes themselves
+response: { fitted: true }`,sample:`const res = await client.navFitVisible({ wait: true });
+// res.data →
+{ fitted: true }
+
+payload:  { bounds: 'bbox' }      // frame the clip box / shapes themselves
+response: { fitted: true }`}]},{ns:`settings`,methods:[{name:`settingsGet`,command:`settings.get`,suspect:null,signature:`settingsGet(): Promise<Result<SettingsGetResult>>`,doc:`Read-only snapshot of the persisted viewer settings, plus the app version.`,example:`payload:  {}
+response: { version: '0.0.10', viewer: { sketch: false, geoEdges: true, ... } }`,sample:`const res = await client.settingsGet();
+// res.data →
+{ version: '0.0.10', viewer: { sketch: false, geoEdges: true, ... } }`},{name:`settingsRenderingSet`,command:`settings.rendering.set`,suspect:null,signature:`settingsRenderingSet(
+  patch: SettingsPatch<RenderingSettings> = {
+
+  }
+): Promise<Result<RenderingSettings>>`,doc:`Set Settings → Rendering (antialiasing, culling, picking, VRAM budget,
+background & selection, outline, transparency, dark colours, debug).
+Any subset of RenderingSettings; unknown keys and wrong types
+are rejected as \`bad-payload\`. Persists exactly like an edit in the
+panel — so send company defaults once (after \`ready()\`), not on every
+load, or the user's own tweaks are overwritten each time. \`reset: true\`
+returns the tab to defaults before the subset applies; an empty call
+only reads. Resolves to the tab's values after the change.`,example:`payload:  { fastAA: true, aaSamples: 16, vramBudgetOn: true, maxVramMb: 2048, bgColor: '#202020' }
+response: { fastAA: true, aaSamples: 16, msaa4x: true, pixelRatio: 1, ..., vramBudgetOn: true, maxVramMb: 2048, ..., bgColor: '#202020', ..., debugBuf: 0 }`,sample:`const res = await client.settingsRenderingSet(…);
+// res.data →
+{ fastAA: true, aaSamples: 16, msaa4x: true, pixelRatio: 1, ..., vramBudgetOn: true, maxVramMb: 2048, ..., bgColor: '#202020', ..., debugBuf: 0 }`},{name:`settingsLightingSet`,command:`settings.lighting.set`,suspect:null,signature:`settingsLightingSet(
+  patch: SettingsPatch<LightingSettings> = {
+
+  }
+): Promise<Result<LightingSettings>>`,doc:`Set Settings → Lighting (ambient + headlight, and sketch mode's own
+pair) — any subset of LightingSettings, same rules as
+TredespaceClient.settingsRenderingSet.`,example:`payload:  { ambientIntensity: 0.4, headlightColor: '#fff4e0', reset: true }
+response: { ambientColor: '#ffffff', ambientIntensity: 0.4, headlightColor: '#fff4e0', headlightIntensity: 0.65, sketchAmbientColor: '#ffffff', ... }`,sample:`const res = await client.settingsLightingSet(…);
+// res.data →
+{ ambientColor: '#ffffff', ambientIntensity: 0.4, headlightColor: '#fff4e0', headlightIntensity: 0.65, sketchAmbientColor: '#ffffff', ... }`},{name:`settingsEdgesSet`,command:`settings.edges.set`,suspect:null,signature:`settingsEdgesSet(
+  patch: SettingsPatch<EdgesSettings> = {
+
+  }
+): Promise<Result<EdgesSettings>>`,doc:`Set Settings → Edges (common switches, flat and authored-normal tuning,
+sketch edges + sketch cube colours) — any subset of
+EdgesSettings, same rules as
+TredespaceClient.settingsRenderingSet.`,example:`payload:  { geoEdges: true, itemEdges: false, edgeColor: 'black', sketchColorMode: 'fill' }
+response: { geoEdges: true, itemEdges: false, edgeColor: '#000000', whiteOnDark: true, darkThr: 0.07, ..., sketchColorMode: 'fill', ..., sketchCubeHoverColor: '#9e9e9e' }`,sample:`const res = await client.settingsEdgesSet(…);
+// res.data →
+{ geoEdges: true, itemEdges: false, edgeColor: '#000000', whiteOnDark: true, darkThr: 0.07, ..., sketchColorMode: 'fill', ..., sketchCubeHoverColor: '#9e9e9e' }`},{name:`settingsAoSet`,command:`settings.ao.set`,suspect:null,signature:`settingsAoSet(
+  patch: SettingsPatch<AoSettings> = {
+
+  }
+): Promise<Result<AoSettings>>`,doc:`Set Settings → Ambient Occlusion — any subset of AoSettings,
+same rules as TredespaceClient.settingsRenderingSet.`,example:`payload:  { aoMode: 2, aoStrength: 0.25 }
+response: { aoMode: 2, aoRadius: 0.8, aoStrength: 0.25, aoSlices: 6, aoSamples: 6 }`,sample:`const res = await client.settingsAoSet(…);
+// res.data →
+{ aoMode: 2, aoRadius: 0.8, aoStrength: 0.25, aoSlices: 6, aoSamples: 6 }`},{name:`settingsGizmoSet`,command:`settings.gizmo.set`,suspect:null,signature:`settingsGizmoSet(
+  patch: Partial<Omit<GizmoSettings, 'labels'>> & {
+    labels?: Partial<GizmoLabels>;
+    reset?: boolean;
+  } = {}
+): Promise<Result<GizmoSettings>>`,doc:`Set Settings → Gizmo: the view cube's colours and/or its face names
+(\`labels\` takes any subset of the six faces; an empty name restores
+that face's default, names are cut to 5 characters). Same rules as
+TredespaceClient.settingsRenderingSet.`,example:`payload:  { cubeFaceColor: '#1e2a3a', labels: { front: 'N', back: 'S', top: 'UP' } }
+response: { cubeFaceColor: '#1e2a3a', cubeLineColor: '#4d5665', cubeTextColor: '#c9cfd8', cubeHoverColor: '#4a6d9c',
+            labels: { front: 'N', back: 'S', left: 'LEFT', right: 'RIGHT', top: 'UP', bottom: 'BOT' } }`,sample:`const res = await client.settingsGizmoSet(…);
+// res.data →
+{ cubeFaceColor: '#1e2a3a', cubeLineColor: '#4d5665', cubeTextColor: '#c9cfd8', cubeHoverColor: '#4a6d9c',
+            labels: { front: 'N', back: 'S', left: 'LEFT', right: 'RIGHT', top: 'UP', bottom: 'BOT' } }`}]},{ns:`gpu`,methods:[{name:`gpuInfoGet`,command:`gpu.info.get`,suspect:null,signature:`gpuInfoGet(): Promise<Result<GpuInfo>>`,doc:`What the viewer is rendering on: the active adapter, what the three
+adapter hints resolve to (WebGPU cannot list GPUs, but a machine whose
+high-performance and low-power hints resolve to different adapters has
+two — \`hasMultipleGpus\`), the optional features it got, the draw path,
+the adapter's limits and the VRAM budget it would suggest. On Linux
+Chrome usually exposes only the GPU its GPU process runs on, so both
+hints resolve to the same adapter there even on dual-GPU laptops.`,example:`payload:  {}
+response: { active: { vendor: 'nvidia', architecture: 'ampere', device: '0x2484', description: 'NVIDIA GeForce RTX 3070', isFallback: false },
+            adapters: { 'high-performance': { vendor: 'nvidia', ... }, 'low-power': { vendor: 'intel', architecture: 'gen-12lp', ... }, fallback: { vendor: 'google', description: 'SwiftShader', isFallback: true, ... } },
+            hasMultipleGpus: true,
+            features: { multiDrawIndirect: true, timestampQuery: true }, cullMode: 'mdi',
+            limits: { maxBufferSize: 4294967296, maxStorageBufferBindingSize: 4294967292 },
+            deviceMemoryGb: 8, isMobile: false }`,sample:`const res = await client.gpuInfoGet();
+// res.data →
+{ active: { vendor: 'nvidia', architecture: 'ampere', device: '0x2484', description: 'NVIDIA GeForce RTX 3070', isFallback: false },
+            adapters: { 'high-performance': { vendor: 'nvidia', ... }, 'low-power': { vendor: 'intel', architecture: 'gen-12lp', ... }, fallback: { vendor: 'google', description: 'SwiftShader', isFallback: true, ... } },
+            hasMultipleGpus: true,
+            features: { multiDrawIndirect: true, timestampQuery: true }, cullMode: 'mdi',
+            limits: { maxBufferSize: 4294967296, maxStorageBufferBindingSize: 4294967292 },
+            deviceMemoryGb: 8, isMobile: false }`}]},{ns:`view`,methods:[{name:`viewSketch`,command:`view.sketch`,suspect:null,signature:`viewSketch(on?: boolean): Promise<Result<{ sketch: boolean }>>`,doc:"Toggle sketch mode (white background + edge lines), or set it explicitly\nby passing `on`. Returns the resulting state.",example:`payload:  {}            // toggle   — or { on: true } / { on: false } to set
+response: { sketch: true }`,sample:`const res = await client.viewSketch();
+// res.data →
+{ sketch: true }`},{name:`viewScreenshot`,command:`view.screenshot`,suspect:null,signature:`viewScreenshot(opts?: { dataUrl?: false }): Promise<Result<ScreenshotBytes>>`,doc:"Capture the current viewport as a PNG — the converged frame (edges, AA,\nAO, view cube) plus the label and measurement overlays, exactly as shown.\nThe bytes arrive TRANSFERRED (zero copy, no base64), so wrap them for\ndisplay: `URL.createObjectURL(new Blob([bytes], { type: mime }))`. Pass\n`{ dataUrl: true }` for the `data:image/png;base64,…` string instead —\nhandy as an `<img>` src, but a third larger and copied through a JS\nstring on both sides.",example:`payload:  {}
+response: { bytes: ArrayBuffer, mime: 'image/png', width: 1920, height: 1080 }
+
+payload:  { dataUrl: true }
+response: { dataUrl: 'data:image/png;base64,iVBORw0KGgoAAA…', mime: 'image/png',
+            width: 1920, height: 1080 }`,sample:`const res = await client.viewScreenshot({});
+// res.data →
+{ bytes: ArrayBuffer, mime: 'image/png', width: 1920, height: 1080 }
+
+payload:  { dataUrl: true }
+response: { dataUrl: 'data:image/png;base64,iVBORw0KGgoAAA…', mime: 'image/png',
+            width: 1920, height: 1080 }`}]},{ns:`stores`,methods:[{name:`storesList`,command:`stores.list`,suspect:null,signature:`storesList(): Promise<Result<{ stores: StoreInfo[] }>>`,doc:"List the stores (projects). Fetch this first to know valid `store` names\nfor assetsList / assetsLoad / assetsImport.",example:`payload:  {}
+response: { stores: [{ name: 'main', description: '', count: 14, modelCount: 12, sqlCount: 2 },
+                     { name: 'project-x', description: 'Client X', count: 3, modelCount: 3, sqlCount: 0 }] }`,sample:`const res = await client.storesList();
+// res.data →
+{ stores: [{ name: 'main', description: '', count: 14, modelCount: 12, sqlCount: 2 },
+                     { name: 'project-x', description: 'Client X', count: 3, modelCount: 3, sqlCount: 0 }] }`},{name:`storesCreate`,command:`stores.create`,suspect:null,signature:`storesCreate(
+  name: string,
+  opts?: {
+    description?: string;
+  }
+): Promise<Result<{
+  created: boolean;
+  store: StoreInfo;
+}>>`,doc:`Create a store (project) with an optional description. Idempotent — an
+existing name (or 'main') resolves with \`created:false\` and the current
+store, so it is safe to call before targeting a store you're not sure
+exists. The name is sanitised (slashes → '-', trimmed, capped at 60).`,example:`payload:  { name: 'project-x', description: 'Client X' }
+response: { created: true, store: { name: 'project-x', description: 'Client X',
+                                   count: 0, modelCount: 0, sqlCount: 0 } }`,sample:`const res = await client.storesCreate('project-x', { description: 'Client X' });
+// res.data →
+{ created: true, store: { name: 'project-x', description: 'Client X',
+                                   count: 0, modelCount: 0, sqlCount: 0 } }`}]},{ns:`assets`,methods:[{name:`assetsList`,command:`assets.list`,suspect:null,signature:`assetsList(store?: string): Promise<Result<{ assets: AssetInfo[] }>>`,doc:"List assets. Pass `store` to list just that store (must be a known name).",example:`payload:  { store: 'main' }   // or {} for all stores
+response: { assets: [
+  { id: 'mdl8f2-k3j9x', store: 'main', name: '/TP400', folder: 'Model1.rvm/TP400',
+    fileName: '_TP400-PIPE.glb', md5: '9e107d9d372bb6826bd81d3542a419d6',
+    size: 812345, kind: 'merged', hasNormals: false, edges: true, loaded: true },
+] }`,sample:`const res = await client.assetsList('main');
+// res.data →
+{ assets: [
+  { id: 'mdl8f2-k3j9x', store: 'main', name: '/TP400', folder: 'Model1.rvm/TP400',
+    fileName: '_TP400-PIPE.glb', md5: '9e107d9d372bb6826bd81d3542a419d6',
+    size: 812345, kind: 'merged', hasNormals: false, edges: true, loaded: true },
+] }`},{name:`assetsImport`,command:`assets.import`,suspect:null,signature:`assetsImport(
+  input: {
+    fileName: string;
+    format: ImportFormat;
+    bytes: ArrayBuffer | Blob;
+    folder?: string;
+    store?: string;
+    replace?: boolean;
+    options?: Record<string, unknown>;
+    meta?: Record<string, unknown>;
+    onProgress?: (fraction: number) => void;
+  }
+): Promise<Result<AssetsImportResult>>`,doc:`Send a file for conversion into the asset manager.
+
+\`bytes\` may be an ArrayBuffer (TRANSFERRED - unusable in the host after) or
+a Blob/File (passed by reference, not detached). A Blob/File at or above
+500 MB is automatically streamed in 64 MB chunks (many small postMessages,
+reassembled in the viewer) so multi-GB files import without ever allocating
+one huge buffer. Everything is plain postMessage - cross-origin safe.
+
+Import does NOT render - call \`assetsLoad\` afterwards, or use
+\`assetsImportAndLoad\`. \`onProgress\` (0..1) fires per chunk for large files.`,example:`payload:  { fileName: 'pump.glb', folder: 'external', store: 'project-x',
+            replace: true,                // drop a prior same store/folder/name asset
+            format: 'glb-standard',        // 'glb-merged' | 'glb-standard' | 'rvm' | 'ifc' | 'step' | 'tdp'
+            bytes,                         // ArrayBuffer | Blob (rides as a transferable)
+            options: { normals: true, edges: true },   // per-format options
+            meta: { zipMd5: 'a1b2…', rev: 42 } }       // yours, returned by assets.list
+response: { entries: [{ id: '...', store: 'project-x', name: 'pump', md5: '…',
+                        size: 40213, kind: 'standard', hasNormals: true }],
+            replaced: 1 }                  // # of prior assets removed by replace`,sample:`const res = await client.assetsImport({ fileName: 'pump.glb', folder: 'external', store: 'project-x',
+            replace: true,
+            format: 'glb-standard',
+            bytes,
+            options: { normals: true, edges: true },
+            meta: { zipMd5: 'a1b2…', rev: 42 } });
+// res.data →
+{ entries: [{ id: '...', store: 'project-x', name: 'pump', md5: '…',
+                        size: 40213, kind: 'standard', hasNormals: true }],
+            replaced: 1 }                  // # of prior assets removed by replace`},{name:`assetsImportAndLoad`,command:null,suspect:null,signature:`assetsImportAndLoad(
+  input: Parameters<TredespaceClient['assetsImport']>[0] & {
+    fit?: boolean;
+    camera?: CameraInput;
+    cameraFirst?: boolean;
+  }
+): Promise<Result<AssetsImportResult & {
+  loaded: number;
+}>>`,doc:`Import then immediately load the produced assets - the "import a sample and
+show it" flow. Returns the import result plus how many were loaded.`,example:null,sample:null},{name:`assetsImportUrl`,command:`assets.importUrl`,suspect:null,signature:`assetsImportUrl(
+  files: ImportUrlFile[],
+  opts?: {
+    concurrent?: number;
+    store?: string;
+    replace?: boolean;
+    onProgress?: (p: ImportUrlProgress) => void;
+    signal?: AbortSignal;
+  }
+): Promise<Result<AssetsImportUrlResult>>`,doc:`Batch-import files the VIEWER downloads by URL - nothing rides
+postMessage, so a host can queue many/large models without shipping their
+bytes across the frame. Each file names its own \`format\` (required - a
+\`.glb\` URL is ambiguous between merged and standard, so nothing is
+inferred on the wire).
+
+\`concurrent\` (default 3, clamped 1..8) files are processed at once
+END-TO-END: for glb/tdp each slot downloads AND cooks, so a slow download
+never stalls a cook that is ready to run. The rvm/ifc/step converters are
+multi-phase and stage through shared temp dirs, so they run one after
+another (their downloads still stream inside the same batch).
+
+Passing \`onProgress\` also puts the viewer in QUIET mode: it drives no
+import dialogs at all, leaving the progress UI entirely to the host.
+Ticks carry the file \`index\`, its phase, and downloaded bytes - see
+ImportUrlProgress. Without \`onProgress\` the viewer shows its own
+import overlay as usual.
+
+One \`results\` entry per input file, in input order; a download or convert
+failure is recorded there and never aborts the batch. URLs are fetched
+under the VIEWER origin's CORS, not the host's.`,example:`payload:  { files: [
+              { url: 'https://cdn.example.com/pump.rvm', format: 'rvm', folder: 'plant' },
+              { url: 'https://cdn.example.com/frame.ifc', format: 'ifc' },
+              { url: 'https://cdn.example.com/valve.glb', format: 'glb-standard',
+                options: { normals: true, edges: true } },
+              { url: 'https://cdn.example.com/site.tdp', format: 'tdp' } ],  // pre-cooked, stored as-is
+            concurrent: 3, store: 'project-x', replace: true, progress: true }
+response: { imported: 3, failed: 1, results: [
+              { url: 'https://cdn.example.com/pump.rvm', ok: true, replaced: 0,
+                entries: [{ id: '...', store: 'project-x', name: 'pump', kind: 'merged' }] },
+              { url: 'https://cdn.example.com/frame.ifc', ok: true, replaced: 1,
+                entries: [{ id: '...', store: 'project-x', name: 'frame', kind: 'merged' }] },
+              { url: 'https://cdn.example.com/valve.glb', ok: false,
+                error: 'download failed: HTTP 404 Not Found' },
+              { url: 'https://cdn.example.com/site.tdp', ok: true, replaced: 0,
+                entries: [{ id: '...', store: 'project-x', name: 'site', kind: 'merged' }] } ] }
+
+// progress events while it runs
+{ tredespace: 1, id: null, type: 'assets.importUrl:progress',
+  payload: { batchId: 'ts-x1-batch-1', completed: 1, total: 4, index: 2,
+             url: 'https://cdn.example.com/valve.glb', phase: 'download',
+             loaded: 8388608, totalBytes: 41943040 } }`,sample:`const res = await client.assetsImportUrl([
+              { url: 'https://cdn.example.com/pump.rvm', format: 'rvm', folder: 'plant' },
+              { url: 'https://cdn.example.com/frame.ifc', format: 'ifc' },
+              { url: 'https://cdn.example.com/valve.glb', format: 'glb-standard',
+                options: { normals: true, edges: true } },
+              { url: 'https://cdn.example.com/site.tdp', format: 'tdp' } ], { concurrent: 3, store: 'project-x', replace: true, progress: true });
+// res.data →
+{ imported: 3, failed: 1, results: [
+              { url: 'https://cdn.example.com/pump.rvm', ok: true, replaced: 0,
+                entries: [{ id: '...', store: 'project-x', name: 'pump', kind: 'merged' }] },
+              { url: 'https://cdn.example.com/frame.ifc', ok: true, replaced: 1,
+                entries: [{ id: '...', store: 'project-x', name: 'frame', kind: 'merged' }] },
+              { url: 'https://cdn.example.com/valve.glb', ok: false,
+                error: 'download failed: HTTP 404 Not Found' },
+              { url: 'https://cdn.example.com/site.tdp', ok: true, replaced: 0,
+                entries: [{ id: '...', store: 'project-x', name: 'site', kind: 'merged' }] } ] }
+
+// progress events while it runs
+{ tredespace: 1, id: null, type: 'assets.importUrl:progress',
+  payload: { batchId: 'ts-x1-batch-1', completed: 1, total: 4, index: 2,
+             url: 'https://cdn.example.com/valve.glb', phase: 'download',
+             loaded: 8388608, totalBytes: 41943040 } }`},{name:`assetsLoad`,command:`assets.load`,suspect:null,signature:`assetsLoad(
+  ids: string[],
+  opts?: {
+    fit?: boolean;
+    store?: string;
+    camera?: CameraInput;
+    cameraFirst?: boolean;
+    concurrent?: number;
+    onProgress?: LoadProgressFn;
+  }
+): Promise<Result<{
+  loaded: number;
+}>>`,doc:`Render imported assets into the viewer. The camera follows one of three
+rules: \`fit: true\` (the default) frames what was loaded; \`fit: false\`
+leaves the camera exactly where it is; a \`camera\` places it explicitly
+and replaces the framing entirely, so the view never fits first and then
+jumps. Pair with assetsImport, or use assetsImportAndLoad.
+
+Models load in parallel (\`concurrent\`, default the viewer's load-pool
+setting). Pass \`onProgress\` for a tick per model as it lands — that also
+puts the viewer in quiet mode, so it drives no loading overlay and the
+progress UI is entirely yours. Without it the viewer shows its own
+overlay, exactly like loading from the Model Assets panel.`,example:`payload:  { ids: ['mdl8f2-k3j9x'], fit: true, store: 'project-x' }  // fit = frame the batch
+response: { loaded: 1 }
+
+payload:  { ids: ['mdl8f2-k3j9x'], camera: { position: [30, -15, 18], target: [12, 3, 1] } }
+response: { loaded: 1 }                        // placed (camera first), not fitted
+
+payload:  { ids: ['mdl8f2-k3j9x'], camera: { target: [12, 3, 1] }, cameraFirst: false }
+response: { loaded: 1 }                        // load, THEN move
+
+payload:  { ids: ['mdl8f2-k3j9x'], fit: false }   // load without moving the camera
+response: { loaded: 1 }
+
+// progress events while a batch loads (with progress: true, no viewer overlay)
+{ tredespace: 1, id: null, type: 'assets.load:progress',
+  payload: { batchId: 'ts-x1-load-2', completed: 2, total: 5, index: 1,
+             id: 'mdl3aa-p0q2z', phase: 'done' } }`,sample:`const res = await client.assetsLoad(['mdl8f2-k3j9x'], { fit: true, store: 'project-x' });
+// res.data →
+{ loaded: 1 }
+
+payload:  { ids: ['mdl8f2-k3j9x'], camera: { position: [30, -15, 18], target: [12, 3, 1] } }
+response: { loaded: 1 }                        // placed (camera first), not fitted
+
+payload:  { ids: ['mdl8f2-k3j9x'], camera: { target: [12, 3, 1] }, cameraFirst: false }
+response: { loaded: 1 }                        // load, THEN move
+
+payload:  { ids: ['mdl8f2-k3j9x'], fit: false }   // load without moving the camera
+response: { loaded: 1 }
+
+// progress events while a batch loads (with progress: true, no viewer overlay)
+{ tredespace: 1, id: null, type: 'assets.load:progress',
+  payload: { batchId: 'ts-x1-load-2', completed: 2, total: 5, index: 1,
+             id: 'mdl3aa-p0q2z', phase: 'done' } }`},{name:`assetsUnload`,command:`assets.unload`,suspect:null,signature:`assetsUnload(ids: string[]): Promise<Result<{ unloaded: number }>>`,doc:`Remove assets from the viewport (they stay in the asset manager). An
+unload forgets the models' per-item state — colors, opacity, hidden
+items, transforms — so loading them again starts clean; keep a look on
+purpose with a state snapshot.`,example:`payload:  { ids: ['mdl8f2-k3j9x'], fit: true, store: 'project-x' }  // fit = frame the batch
+response: { loaded: 1 }
+
+payload:  { ids: ['mdl8f2-k3j9x'], camera: { position: [30, -15, 18], target: [12, 3, 1] } }
+response: { loaded: 1 }                        // placed (camera first), not fitted
+
+payload:  { ids: ['mdl8f2-k3j9x'], camera: { target: [12, 3, 1] }, cameraFirst: false }
+response: { loaded: 1 }                        // load, THEN move
+
+payload:  { ids: ['mdl8f2-k3j9x'], fit: false }   // load without moving the camera
+response: { loaded: 1 }
+
+// progress events while a batch loads (with progress: true, no viewer overlay)
+{ tredespace: 1, id: null, type: 'assets.load:progress',
+  payload: { batchId: 'ts-x1-load-2', completed: 2, total: 5, index: 1,
+             id: 'mdl3aa-p0q2z', phase: 'done' } }`,sample:`const res = await client.assetsUnload(['mdl8f2-k3j9x']);
+// res.data →
+{ loaded: 1 }
+
+payload:  { ids: ['mdl8f2-k3j9x'], camera: { position: [30, -15, 18], target: [12, 3, 1] } }
+response: { loaded: 1 }                        // placed (camera first), not fitted
+
+payload:  { ids: ['mdl8f2-k3j9x'], camera: { target: [12, 3, 1] }, cameraFirst: false }
+response: { loaded: 1 }                        // load, THEN move
+
+payload:  { ids: ['mdl8f2-k3j9x'], fit: false }   // load without moving the camera
+response: { loaded: 1 }
+
+// progress events while a batch loads (with progress: true, no viewer overlay)
+{ tredespace: 1, id: null, type: 'assets.load:progress',
+  payload: { batchId: 'ts-x1-load-2', completed: 2, total: 5, index: 1,
+             id: 'mdl3aa-p0q2z', phase: 'done' } }`},{name:`assetsSetLoaded`,command:`assets.setLoaded`,suspect:null,signature:`assetsSetLoaded(
+  ids: string[],
+  opts?: {
+    store?: string;
+    fit?: boolean;
+    camera?: CameraInput;
+    cameraFirst?: boolean;
+    concurrent?: number;
+    onProgress?: LoadProgressFn;
+  }
+): Promise<Result<{
+  loaded: number;
+  unloaded: number;
+  missing: string[];
+}>>`,doc:`Declaratively set WHICH assets are loaded: after this call the loaded
+set is exactly \`ids\` — anything loaded but not listed is unloaded,
+anything listed but not yet loaded is loaded, anything already right is
+untouched (idempotent, so a sync can call it every cycle). An empty
+array unloads everything. \`store\` scopes both directions to that store —
+assets in other stores are never touched. \`fit\` is OPT-IN here (a
+background sync should not move the camera) and frames the union of the
+whole desired set, not just what this call loaded. \`missing\` returns
+requested ids that are not in the asset manager — import those first.
+Unloading forgets a model's per-item state (colors, opacity, hidden
+items, transforms), so a later load starts clean.`,example:`payload:  { ids: ['mdl8f2-k3j9x', 'mdl3aa-p0q2z'], store: 'project-x', fit: false }
+response: { loaded: 1, unloaded: 2, missing: [] }`,sample:`const res = await client.assetsSetLoaded(['mdl8f2-k3j9x', 'mdl3aa-p0q2z'], { store: 'project-x', fit: false });
+// res.data →
+{ loaded: 1, unloaded: 2, missing: [] }`},{name:`assetsRemove`,command:`assets.remove`,suspect:null,signature:`assetsRemove(
+  ids: string[],
+  opts?: {
+    store?: string;
+  }
+): Promise<Result<{
+  removed: number;
+}>>`,doc:`Delete persisted assets from local storage (OPFS). A copy already loaded
+into the viewer stays on screen - import -> load -> remove leaves a
+session-only model with nothing on disk.`,example:`payload:  { ids: ['mdl8f2-k3j9x'], store: 'project-x' }
+response: { removed: 1 }`,sample:`const res = await client.assetsRemove(['mdl8f2-k3j9x'], { store: 'project-x' });
+// res.data →
+{ removed: 1 }`}]},{ns:`sql`,methods:[{name:`sqlList`,command:`sql.list`,suspect:null,signature:`sqlList(store?: string): Promise<Result<{ dbs: SqlDbInfo[] }>>`,doc:"List SQLite databases. Pass `store` to list just that store (a known\nname). Each db's `path` is what you pass as `mainDb` to `sqlQuery`.",example:`payload:  { store: 'main' }   // or {} for all stores
+response: { dbs: [
+  { store: 'main', fileName: 'meta.db', path: 'sql_assets/main/meta.db',
+    size: 61440, modified: 1721600000000, md5: '9e107d9d372bb6826bd81d3542a419d6',
+    meta: { zipMd5: 'c3d4…' } },
+] }`,sample:`const res = await client.sqlList('main');
+// res.data →
+{ dbs: [
+  { store: 'main', fileName: 'meta.db', path: 'sql_assets/main/meta.db',
+    size: 61440, modified: 1721600000000, md5: '9e107d9d372bb6826bd81d3542a419d6',
+    meta: { zipMd5: 'c3d4…' } },
+] }`},{name:`sqlImport`,command:`sql.import`,suspect:null,signature:`sqlImport(
+  input: {
+    fileName: string;
+    bytes: ArrayBuffer | Blob;
+    store?: string;
+    replace?: boolean;
+    meta?: Record<string, unknown>;
+    onProgress?: (p: SqlImportProgress) => void;
+  }
+): Promise<Result<SqlImportResult>>`,doc:`Import a .db/.sqlite file into a store (default 'main'). \`bytes\` is an
+ArrayBuffer (TRANSFERRED — unusable after) or a Blob/File (by reference).
+\`replace: true\` overwrites an existing same-name db; false (default) skips
+it. WAL databases are normalised to rollback journalling on the way in
+(the OPFS VFS is shm-less, so WAL can't be read shared). The md5 of the
+bytes as delivered is recorded and returned by \`sqlList\` — hash your
+source file and compare to decide whether an import is needed at all.`,example:`iframe.contentWindow.postMessage({
+  tredespace: 1, id: 'req-9', type: 'sql.import',
+  payload: { fileName: 'meta.db', store: 'main', replace: true },
+  bytes,                                    // ArrayBuffer, listed as transferable
+}, origin, [bytes]);
+
+response: { imported: ['sql_assets/main/meta.db'], skipped: [], replaced: 1 }`,sample:null},{name:`sqlImportUrl`,command:`sql.importUrl`,suspect:null,signature:`sqlImportUrl(
+  input: {
+    files: SqlImportUrlFile[];
+    store?: string;
+    replace?: boolean;
+    onProgress?: (p: SqlImportProgress) => void;
+    signal?: AbortSignal;
+  }
+): Promise<Result<SqlImportUrlResult>>`,doc:`Batch-import .db/.sqlite files the VIEWER downloads by URL — nothing
+rides postMessage, and each download is STREAMED straight into OPFS
+(constant memory, so multi-GB databases are fine). URLs are fetched
+under the viewer origin's CORS, not the host's. \`replace: true\`
+overwrites an existing same-name db; false (default) skips it WITHOUT
+downloading. The md5 of the downloaded bytes is recorded per file (see
+\`sqlList\`) — hash your hosted file and compare first to skip unchanged
+imports entirely. Files run serially; a download failure lands in
+\`failed\` and never aborts the rest.`,example:`payload:  { files: [
+              { url: 'https://cdn.example.com/meta.db' },
+              { url: 'https://cdn.example.com/big.sqlite', fileName: 'tags.db',
+                meta: { zipMd5: 'c3d4…' } } ],       // yours, returned by sql.list
+            store: 'project-x', replace: true, progress: true }
+response: { imported: ['sql_assets/project-x/meta.db'],
+            skipped: ['tags.db'],          // locked by another tab (or existed, when replace is false)
+            replaced: 1,
+            failed: [] }                    // [{ url, error }] for download failures
+
+// progress events while it runs
+{ tredespace: 1, id: null, type: 'sql.importUrl:progress',
+  payload: { batchId: 'ts-x1-sql-3', completed: 1, total: 2, index: 1,
+             fileName: 'tags.db', url: 'https://…/big.sqlite',
+             phase: 'download', loaded: 8388608, totalBytes: 41943040 } }`,sample:`const res = await client.sqlImportUrl({ files: [
+              { url: 'https://cdn.example.com/meta.db' },
+              { url: 'https://cdn.example.com/big.sqlite', fileName: 'tags.db',
+                meta: { zipMd5: 'c3d4…' } } ],
+            store: 'project-x', replace: true, progress: true });
+// res.data →
+{ imported: ['sql_assets/project-x/meta.db'],
+            skipped: ['tags.db'],          // locked by another tab (or existed, when replace is false)
+            replaced: 1,
+            failed: [] }                    // [{ url, error }] for download failures
+
+// progress events while it runs
+{ tredespace: 1, id: null, type: 'sql.importUrl:progress',
+  payload: { batchId: 'ts-x1-sql-3', completed: 1, total: 2, index: 1,
+             fileName: 'tags.db', url: 'https://…/big.sqlite',
+             phase: 'download', loaded: 8388608, totalBytes: 41943040 } }`},{name:`sqlCheck`,command:`sql.check`,suspect:null,signature:`sqlCheck(
+  input: {
+    sql: string;
+    mainDb?: string;
+  }
+): Promise<Result<{
+  dbs: SqlCheckEntry[];
+  statements: SqlCheckStatement[];
+}>>`,doc:'Pre-flight a SQL script WITHOUT running it. `dbs`: which databases it\nreferences (the optional `mainDb` plus every `ATTACH DATABASE \'…\'`\nliteral, in appearance order) and whether they are present — present\nentries carry `size` / `modified` / `md5` (import-time hash of the\ndelivered bytes), so a host can compare against its manifest and\n`sqlImportUrl` only the missing or outdated files before calling\n`sqlQuery`. `statements`: the statements the script would actually run,\ncomments stripped, each labelled with its leading keyword and whether it\nanswers with rows — enough to reject a script that writes, to count the\nqueries, or to tell "empty" from "only comments" before running it.',example:`payload:  { sql: "-- daily\\nATTACH DATABASE 'sql_assets/main/tags.db' AS tags; SELECT * FROM tags.t",
+            mainDb: 'sql_assets/main/meta.db' }
+response: { dbs: [
+  { path: 'sql_assets/main/meta.db', exists: true,
+    size: 61440, modified: 1721600000000, md5: '9e107d9d372bb6826bd81d3542a419d6' },
+  { path: 'sql_assets/main/tags.db', exists: false } ],
+  statements: [
+    { sql: "ATTACH DATABASE 'sql_assets/main/tags.db' AS tags", kind: 'attach',
+      returnsRows: false, attach: 'sql_assets/main/tags.db' },
+    { sql: 'SELECT * FROM tags.t', kind: 'select', returnsRows: true } ] }`,sample:`const res = await client.sqlCheck({ sql: "-- daily\\nATTACH DATABASE 'sql_assets/main/tags.db' AS tags; SELECT * FROM tags.t",
+            mainDb: 'sql_assets/main/meta.db' });
+// res.data →
+{ dbs: [
+  { path: 'sql_assets/main/meta.db', exists: true,
+    size: 61440, modified: 1721600000000, md5: '9e107d9d372bb6826bd81d3542a419d6' },
+  { path: 'sql_assets/main/tags.db', exists: false } ],
+  statements: [
+    { sql: "ATTACH DATABASE 'sql_assets/main/tags.db' AS tags", kind: 'attach',
+      returnsRows: false, attach: 'sql_assets/main/tags.db' },
+    { sql: 'SELECT * FROM tags.t', kind: 'select', returnsRows: true } ] }`},{name:`sqlDelete`,command:`sql.delete`,suspect:null,signature:`sqlDelete(
+  paths: string[]
+): Promise<Result<{
+  deleted: string[];
+  skipped: string[];
+}>>`,doc:"Delete databases by their OPFS `path` (from `sqlList`). A path in use by a\nrunning query (or another tab) is skipped, not waited on.",example:`payload:  { paths: ['sql_assets/main/meta.db'] }
+response: { deleted: ['sql_assets/main/meta.db'], skipped: [] }`,sample:`const res = await client.sqlDelete(['sql_assets/main/meta.db']);
+// res.data →
+{ deleted: ['sql_assets/main/meta.db'], skipped: [] }`},{name:`sqlQuery`,command:`sql.query`,suspect:null,signature:`sqlQuery(
+  input: {
+    sql: string;
+    mainDb: string;
+    lockmode?: 'shared' | 'exclusive';
+    maxRows?: number;
+  }
+): Promise<Result<SqlQueryResult>>`,doc:"Run SQL against `mainDb` (a path from `sqlList`). ATTACH other databases\ninline with their OPFS path and they are locked automatically. `lockmode`\ndefaults to 'shared' (read-only, several readers at once); pass\n'exclusive' to write. Rows per statement are capped at `maxRows` (default\n10000; a cut statement carries `truncated: true`). Results come back one\nentry per statement, in order.",example:`payload:  { mainDb: 'sql_assets/main/meta.db',
+            sql: "SELECT id, name FROM part LIMIT 2;",
+            lockmode: 'shared', maxRows: 10000 }
+response: { statements: [
+  { columns: ['id', 'name'], rows: [[1, 'Flange'], [2, 'Bolt']], rowCount: 2 },
+], ms: 4.1 }`,sample:`const res = await client.sqlQuery({ mainDb: 'sql_assets/main/meta.db',
+            sql: "SELECT id, name FROM part LIMIT 2;",
+            lockmode: 'shared', maxRows: 10000 });
+// res.data →
+{ statements: [
+  { columns: ['id', 'name'], rows: [[1, 'Flange'], [2, 'Bolt']], rowCount: 2 },
+], ms: 4.1 }`},{name:`sqlColor`,command:`sql.color`,suspect:null,signature:`sqlColor(
+  input: SqlRunInput & {
+    mode?: ColorMode;
+    onProgress?: (p: {
+      rows: number;
+    }) => void;
+  }
+): Promise<Result<SqlColorResult>>`,doc:"Colour the model FROM a query — the SQL editor's Color White / Hidden /\nSet buttons, over the API. The query must return a `fullname` column and\nmay return `fullname_color` (`'#ff0000'`, `'yellow'`, `'default'`, with an\noptional `:opacity` suffix); rows without one get yellow.\n\nNothing but the counts crosses the boundary: the viewer packs the result\ninside its SQL worker and hands it to the model DB as flat buffers, so\nthis is the form to use for million-row results — `sqlQuery` + a colour\nrule would ship every name to your page and back.\n\n`mode` picks the treatment — see ColorMode: the viewer's own\nwhite / hidden / transparent / set-colour base coats, or your own colour\nand rule set. Defaults to `{ type: 'default-white' }`.",example:`payload:  { mainDb: 'sql_assets/main/meta.db',
+            sql: "select fullname, fullname_color from paint_plan where system = (select v from FILTER_ARGS where k='sys')",
+            filters: [{ key: 'sys', value: 'HVAC' }],
+            mode: { type: 'default-transparent', opacity: 0.1 } }
+response: { mode: 'default-transparent', rows: 412339, ms: 1840 }`,sample:`const res = await client.sqlColor(…);
+// res.data →
+{ mode: 'default-transparent', rows: 412339, ms: 1840 }`},{name:`sqlSelect`,command:`sql.select`,suspect:null,signature:`sqlSelect(
+  input: SqlRunInput & {
+    append?: boolean;
+    onProgress?: (p: {
+      rows: number;
+    }) => void;
+  }
+): Promise<Result<SqlSelectResult>>`,doc:"Select what a query returns (its `fullname` column), through the same\npacked path as sqlColor — the rows never reach your page.\n`append` adds to the current selection instead of replacing it.",example:`payload:  { mainDb: 'sql_assets/main/meta.db',
+            sql: 'select fullname from defects where severity > 2',
+            append: false }
+response: { rows: 1204, matched: 1198, missed: 6, ms: 210 }`,sample:`const res = await client.sqlSelect(…);
+// res.data →
+{ rows: 1204, matched: 1198, missed: 6, ms: 210 }`},{name:`sqlTable`,command:`sql.table`,suspect:null,signature:`sqlTable(
+  input: SqlRunInput & {
+    name?: string;
+    loadAll?: boolean;
+    show?: boolean;
+  }
+): Promise<Result<{
+  columns: string[];
+  rows: number;
+}>>`,doc:"Run a query and show it in the viewer's SQL Table panel (`loadAll` lifts\nthe 50-row preview cap to 250k). The rows land in the panel, not in the\nresponse — you get the column names and the row count. `show: false`\nfills the panel without opening it.",example:`payload:  { mainDb: 'sql_assets/main/meta.db', sql: 'select * from defects',
+            name: 'Open defects', loadAll: false }
+response: { columns: ['id', 'fullname', 'severity'], rows: 50 }`,sample:`const res = await client.sqlTable(…);
+// res.data →
+{ columns: ['id', 'fullname', 'severity'], rows: 50 }`},{name:`sqlEditor`,command:`sql.editor`,suspect:null,signature:`sqlEditor(
+  input: {
+    sql: string;
+    replace?: boolean;
+    name?: string;
+    store?: string;
+    fileName?: string;
+    mainDb?: string;
+    show?: boolean;
+    title?: string;
+    description?: string;
+    types?: SqlReportType[];
+    filters?: SqlEditorFilter[];
+  }
+): Promise<Result<{
+  replaced: boolean;
+  mainDb: string;
+  chars: number;
+}>>`,doc:"Put SQL into the viewer's **SQL Editor** panel — for when the USER should\nsee, tweak and run a query rather than the host running it headless.\nNothing is executed.\n\n`replace` (default true) swaps the whole script; `false` appends the SQL\nbelow what is there as a titled block:\n\n```sql\n-------------------------------------------------\n-- daily defects\n-------------------------------------------------\n\nselect …\n```\n\nso several queries can be stacked for the user to run one by one. `name`\ntitles that block (default `sql`); passing one also titles a replacing\nscript. Any text selection is cleared, so the panel's run buttons act on\nthe whole script.\n\n`store` + `fileName` point the editor's Main db at a database without the\nhost building OPFS paths (`mainDb` takes a path directly, `''` = the\npanel's \"None — attach only\"); omit them and the current pick stands.\n`show: false` fills the panel without opening it; otherwise the editor\nopens docked to the RIGHT of the viewport (an already-open editor is\nfocused where it is).\n\n`title`, `description`, `types` and `filters` fill the editor's report\nfields — the shape TredespaceClient.sqlEditorGet returns, so a\ndraft the host stored comes back whole. They apply whenever present, with\nor without `replace`; a filter needs a `key` (`kind` defaults to INPUT).",example:"\n`name` titles that block (default `sql`); passing a name titles a replacing\nscript too. Any text selection is cleared — the panel's action buttons run the\nselected text when there is one, and a stale selection would slice the OLD\nscript.\n\n`store` + `fileName` point the editor's Main db at a database without the host\nbuilding OPFS paths; `mainDb` takes a path directly (`''` selects \"None —\nattach only\"), and omitting all three leaves the current pick alone.\n`show: false` fills the panel without opening it; otherwise the editor opens\ndocked to the RIGHT of the viewport (an already-open editor is focused where\nit is).\n\n`title`, `description`, `types` (`TABLE` / `COLORING` / `DETAIL`) and\n`filters` fill the editor's report fields — the same shape `sql.editor.get`\nreturns, so a draft a host stored comes back whole. They apply whenever\npresent, with or without `replace`; a filter needs a `key` (`kind` defaults to\n`INPUT`), and an unknown type or kind is `bad-payload`.",sample:null},{name:`sqlEditorGet`,command:`sql.editor.get`,suspect:null,signature:`sqlEditorGet(): Promise<Result<SqlEditorDraft>>`,doc:"Read the **SQL Editor**'s draft: the report fields the user filled in —\n`title` (the report name), `description`, `mainDb`, `types`, `sql` and\nthe `filters` — plus `databases`, the files a run would lock. The editor\nhas no Save of its own: store this, and hand it back to\nTredespaceClient.sqlEditor later to restore it unchanged.",example:`payload:  {}
+response: { title: 'Daily defects', description: '', mainDb: 'sql_assets/project-x/meta.db',
+            types: ['TABLE'],
+            sql: "select * from defects where severity > (select v from FILTER_ARGS where k='minSeverity')",
+            filters: [{ kind: 'INPUT', key: 'minSeverity', label: 'Min severity', value: '2' }],
+            databases: ['sql_assets/project-x/meta.db'] }`,sample:`const res = await client.sqlEditorGet();
+// res.data →
+{ title: 'Daily defects', description: '', mainDb: 'sql_assets/project-x/meta.db',
+            types: ['TABLE'],
+            sql: "select * from defects where severity > (select v from FILTER_ARGS where k='minSeverity')",
+            filters: [{ kind: 'INPUT', key: 'minSeverity', label: 'Min severity', value: '2' }],
+            databases: ['sql_assets/project-x/meta.db'] }`},{name:`sqlDetail`,command:`sql.detail`,suspect:null,signature:`sqlDetail(
+  input: SqlRunInput & {
+    name?: string;
+    show?: boolean;
+    autoRemove?: boolean;
+  }
+): Promise<Result<{
+  bound: boolean;
+  name: string;
+  panel: string;
+  autoRemove: boolean;
+}>>`,doc:`Bind a query to a SQL Detail panel: every hierarchy click runs it against
+the clicked node — write it against TREE_VIEW_ARGS, e.g.
+\`… where fullname in (select FULLNAME from TREE_VIEW_ARGS)\`.
+
+\`name\` is the panel's IDENTITY as well as its tab title: each distinct
+name gets its OWN detail panel, so several queries can follow the
+selection side by side, and calling again with a name already in use
+re-binds that panel instead of opening another. Without a name the
+viewer's built-in SQL Detail panel is used. \`show: false\` binds without
+opening the panel. \`panel\` in the response is the dock panel id — pass it
+to uiShowPanel / uiHidePanel.
+
+\`autoRemove\` (default true) decides what CLOSING a named panel does:
+true deletes the panel and its query outright, false keeps it in the
+viewer's Panels list so reopening restores the query. The panel header
+carries the same switch (an Auto-remove / Keep button); OMIT the field
+when re-binding a query and whatever the user chose there stands — pass
+it only to set it. A layout change (kiosk, a layout slot) never counts as
+a close. The response reports the value in effect.
+
+Named panels last for the viewer SESSION (like host-managed external
+apps): after a page reload, create them again.`,example:`
+\`name\` is the panel's IDENTITY as well as its tab title. Each distinct name
+gets its OWN detail panel, so several queries can follow the selection side by
+side; calling again with a name already in use re-binds that panel (and
+focuses it) instead of opening another. Omit \`name\` to use the viewer's
+built-in SQL Detail panel. \`show: false\` binds without opening the panel, and
+\`panel\` in the response is the dock panel id — pass it to \`ui.showPanel\` /
+\`ui.hidePanel\`.
+
+\`autoRemove\` (default true) decides what CLOSING a named panel does: true
+deletes the panel and its query outright, false keeps it in the viewer's
+Panels list so reopening it restores the query. The panel header carries the
+same switch — an **Auto-remove** / **Keep** button — so the user can change
+their mind about a panel a host created; OMIT the field when re-binding a
+query and their choice stands, pass it only to set it. The response reports
+the value in effect. A layout change (kiosk, switching a layout slot) is not a
+close and never removes anything.
+
+Named panels are SESSION-only, like host-managed external apps: a page reload
+drops them (a stale layout slot shows an "Unknown panel" placeholder until the
+host creates it again).`,sample:null},{name:`sqlExecute`,command:`sql.execute`,suspect:null,signature:`sqlExecute(
+  input: {
+    mainDb: string;
+    statements: SqlStatementInput[];
+    attach?: string[];
+    lockmode?: 'shared' | 'exclusive';
+    maxRows?: number;
+    progressSize?: number;
+    onProgress?: (p: SqlExecuteProgress) => void;
+    signal?: AbortSignal;
+  }
+): Promise<Result<SqlExecuteResult>>`,doc:"Run a BATCH of statements against `mainDb` in ONE transaction, with the\nfull per-statement contract: bindings (bulk rows step a prepared\nstatement), `collect` per statement, names for readable results. The\nwhole batch commits or rolls back together (with `lockmode: 'exclusive'`;\n'shared' is read-only). `attach` lists extra database paths to lock; any\n`ATTACH DATABASE '…'` literal in a statement is locked automatically as\nwell. `onProgress` gets a tick per finished statement and every\n`progressSize` (default 1000) rows — use it for long loads. Same row cap\nrules as `sqlQuery`.",example:`payload:  { mainDb: 'sql_assets/main/meta.db', lockmode: 'exclusive',
+            statements: [
+              { name: 'schema', sql: 'CREATE TABLE IF NOT EXISTS tag(id INTEGER PRIMARY KEY, name TEXT)' },
+              { name: 'load',   sql: 'INSERT INTO tag(id, name) VALUES (?, ?)',
+                binding: [[1, 'P-101'], [2, 'V-204'], [3, null]] },   // stepped per row
+              { name: 'count',  sql: 'SELECT count(*) AS n FROM tag', collect: true } ],
+            progress: true, progressSize: 500 }
+response: { statements: [
+              { name: 'schema', columns: null, rows: [], rowCount: 0 },
+              { name: 'load',   columns: null, rows: [], rowCount: 0 },
+              { name: 'count',  columns: ['n'], rows: [[3]], rowCount: 1 } ],
+            ms: 6.2 }
+
+// progress events while it runs
+{ tredespace: 1, id: null, type: 'sql.execute:progress',
+  payload: { batchId: 'ts-x1-sqlexecuteprogress-4', type: 'statement', no: 1, total: 3, name: 'load' } }
+{ tredespace: 1, id: null, type: 'sql.execute:progress',
+  payload: { batchId: 'ts-x1-sqlexecuteprogress-4', type: 'row', no: 500, total: null } }`,sample:`const res = await client.sqlExecute({ mainDb: 'sql_assets/main/meta.db', lockmode: 'exclusive',
+            statements: [
+              { name: 'schema', sql: 'CREATE TABLE IF NOT EXISTS tag(id INTEGER PRIMARY KEY, name TEXT)' },
+              { name: 'load',   sql: 'INSERT INTO tag(id, name) VALUES (?, ?)',
+                binding: [[1, 'P-101'], [2, 'V-204'], [3, null]] },
+              { name: 'count',  sql: 'SELECT count(*) AS n FROM tag', collect: true } ],
+            progress: true, progressSize: 500 });
+// res.data →
+{ statements: [
+              { name: 'schema', columns: null, rows: [], rowCount: 0 },
+              { name: 'load',   columns: null, rows: [], rowCount: 0 },
+              { name: 'count',  columns: ['n'], rows: [[3]], rowCount: 1 } ],
+            ms: 6.2 }
+
+// progress events while it runs
+{ tredespace: 1, id: null, type: 'sql.execute:progress',
+  payload: { batchId: 'ts-x1-sqlexecuteprogress-4', type: 'statement', no: 1, total: 3, name: 'load' } }
+{ tredespace: 1, id: null, type: 'sql.execute:progress',
+  payload: { batchId: 'ts-x1-sqlexecuteprogress-4', type: 'row', no: 500, total: null } }`}]},{ns:`camera`,methods:[{name:`cameraGet`,command:`camera.get`,suspect:null,signature:`cameraGet(): Promise<Result<CameraState>>`,doc:"The camera's current placement — both as orbit parameters and as an eye\n`position`. Round-trips: hand what you get back to `cameraSet` (or to\n`assetsLoad`'s `camera` option) to restore this exact view.",example:`payload:  { }
+response: { target: [12.4, 3.1, 0.8], position: [30.2, -14.9, 18.6],
+            azimuth: 0.61, elevation: 0.5, distance: 42.7, orthographic: false }`,sample:`const res = await client.cameraGet();
+// res.data →
+{ target: [12.4, 3.1, 0.8], position: [30.2, -14.9, 18.6],
+            azimuth: 0.61, elevation: 0.5, distance: 42.7, orthographic: false }`},{name:`cameraSet`,command:`camera.set`,suspect:null,signature:`cameraSet(
+  camera: CameraInput
+): Promise<Result<{
+  target: [number, number, number];
+  azimuth: number;
+  elevation: number;
+  distance: number;
+}>>`,doc:"Move the camera. Give an eye `position` + `target`, or orbit parameters;\nomitted fields keep their current value. `animate: false` snaps instead\nof gliding. Resolves once the camera has ARRIVED, so a chained call sees\nthe final view; an explicit placement also keeps the first-model default\nview from overriding it. To place the camera as models appear, prefer the `camera`\noption on `assetsLoad` / `assetsSetLoaded` — it replaces their framing\nstep, so the view never fits first and then jumps.",example:`payload:  { position: [30, -15, 18], target: [12, 3, 1], animate: false }
+response: { target: [12, 3, 1], azimuth: 0.61, elevation: 0.5, distance: 42.7 }`,sample:`const res = await client.cameraSet(…);
+// res.data →
+{ target: [12, 3, 1], azimuth: 0.61, elevation: 0.5, distance: 42.7 }`}]},{ns:`viewpoints`,methods:[{name:`viewpointsGet`,command:`viewpoints.get`,suspect:null,signature:`viewpointsGet(): Promise<Result<{ config: ViewpointsConfig }>>`,doc:`The whole viewpoint set as one opaque JSON blob — the same shape the
+panel's Save button writes to file. Persist it host-side (per user, per
+project…) and restore it later with \`viewpointsSet\`.`,example:`payload:  { }
+response: { config: { version: 1, viewpoints: [ /* full viewpoint records */ ] } }`,sample:`const res = await client.viewpointsGet();
+// res.data →
+{ config: { version: 1, viewpoints: [ /* full viewpoint records */ ] } }`},{name:`viewpointsSet`,command:`viewpoints.set`,suspect:null,signature:`viewpointsSet(
+  config: ViewpointsConfig,
+  opts?: {
+    showViewer?: boolean;
+    activateFirst?: boolean;
+  }
+): Promise<Result<{
+  loaded: number;
+  activated: boolean;
+}>>`,doc:`REPLACE the current viewpoint set from a config blob (from
+\`viewpointsGet\`, a \`viewpoints.bookmark\` event, or a saved viewpoints
+JSON file — same shape). Viewpoints carry model-relative content
+(fullnames, positions, color rules), so restore them alongside the same
+loaded models. \`showViewer: true\` then docks the Viewpoint Viewer panel
+on the RIGHT and makes it active, ready to present.
+\`activateFirst: true\` also RUNS the first viewpoint of the loaded set —
+camera, clipping, labels, measurements, Set Color rules and selection,
+as clicking it in the panel does — so a host can restore a session in
+one call. A load on its own only selects it. \`activated\` says whether
+one ran (false for an empty set). Built for page load: it waits for the
+viewport to finish booting first (\`app.ready\` normally reports
+\`gpu: 'booting'\`, and activating before the renderer exists would apply
+the viewpoint except its camera), then resolves once the viewpoint is
+applied, with the camera still gliding into place.`,example:`payload:  { config: { version: 1, viewpoints: [ … ] }, showViewer: true, activateFirst: true }
+response: { loaded: 3, activated: true }`,sample:`const res = await client.viewpointsSet({ version: 1, viewpoints: [ … ] }, { showViewer: true, activateFirst: true });
+// res.data →
+{ loaded: 3, activated: true }`},{name:`viewpointsSetUrl`,command:`viewpoints.setUrl`,suspect:null,signature:`viewpointsSetUrl(
+  url: string,
+  opts?: {
+    showViewer?: boolean;
+    activateFirst?: boolean;
+  }
+): Promise<Result<{
+  loaded: number;
+  activated: boolean;
+}>>`,doc:"REPLACE the current viewpoint set from a hosted viewpoints JSON file the\nVIEWER downloads itself (viewer-origin CORS, like the other *Url\ncommands) — same blob shape as `viewpointsGet` / a panel-saved file.\n`showViewer: true` then docks the Viewpoint Viewer panel on the RIGHT\nand makes it active, ready to present the loaded set, and\n`activateFirst: true` runs the first viewpoint of that set — both behave\nexactly as on `viewpointsSet`.",example:`payload:  { url: 'https://cdn.example.com/plant-7/viewpoints.json', showViewer: true, activateFirst: true }
+response: { loaded: 3, activated: true }`,sample:`const res = await client.viewpointsSetUrl('https://cdn.example.com/plant-7/viewpoints.json', { showViewer: true, activateFirst: true });
+// res.data →
+{ loaded: 3, activated: true }`},{name:`viewpointsAddFromLabels`,command:`viewpoints.addFromLabels`,suspect:null,signature:`viewpointsAddFromLabels(
+  opts?: {
+    ids?: number[];
+    fullnames?: string[];
+    showViewer?: boolean;
+  }
+): Promise<Result<{
+  added: number;
+  skipped: number;
+  ignored: number;
+}>>`,doc:"Add one viewpoint per label with a linked fullname — what the Labels\npanel's \"Selected to viewpoints\" button does: the label's first line as\nthe name, the fullname as the viewpoint's selection, the label copied\nin, and the camera pivoted on the label's anchor at the distance that\nframes the item (never closer than 2 m, current view direction kept).\nPick labels by `ids` (from `labelsGet`) and/or `fullnames`; with\nneither, the SELECTED labels are used. Labels without a fullname are\n`ignored`, and a fullname + name pair some viewpoint already carries is\n`skipped`, so calling again only adds what is new. Nothing is\nactivated; `showViewer: true` docks the Viewpoint Viewer on the right.",example:`payload:  { fullnames: ['/PLANT/AREA-1/PUMP-101'], showViewer: true }
+response: { added: 1, skipped: 0, ignored: 0 }
+
+payload:  { }                      // the selected labels
+response: { added: 3, skipped: 1, ignored: 0 }`,sample:`const res = await client.viewpointsAddFromLabels({ fullnames: ['/PLANT/AREA-1/PUMP-101'], showViewer: true });
+// res.data →
+{ added: 1, skipped: 0, ignored: 0 }
+
+payload:  { }                      // the selected labels
+response: { added: 3, skipped: 1, ignored: 0 }`},{name:`viewpointsSetBookmarkButton`,command:`viewpoints.setBookmarkButton`,suspect:null,signature:`viewpointsSetBookmarkButton(
+  button: {
+    label: string;
+    tooltip?: string;
+  } | null
+): Promise<Result<{
+  shown: boolean;
+}>>`,doc:`Show (or remove, with null) a SESSION-ONLY bookmark button in the
+Viewpoints panel, between Add viewpoint and Save. When the user clicks
+it the viewer fires the unsolicited \`viewpoints.bookmark\` event with the
+current config attached — subscribe with \`onViewpointsBookmark\` and
+persist it wherever bookmarks live. Like host-set external apps, the
+button is never persisted: gone on reload until set again after
+\`app.ready\`.`,example:`payload:  { button: { label: 'Bookmark', tooltip: 'Save this view to the project' } }
+response: { shown: true }
+
+payload:  { button: null }        // remove the button
+response: { shown: false }`,sample:`const res = await client.viewpointsSetBookmarkButton({ button: { label: 'Bookmark', tooltip: 'Save this view to the project' } });
+// res.data →
+{ shown: true }
+
+payload:  { button: null }        // remove the button
+response: { shown: false }`}]},{ns:`ui`,methods:[{name:`uiDialogs`,command:`ui.dialogs`,suspect:null,signature:`uiDialogs(): Promise<Result<{ dialogs: DialogInfo[] }>>`,doc:"Every external app the viewer hosts right now — modal dialogs and dock\npanels, told apart by `kind` — with its `hidden` state. The ids are what\n`uiDialogHide` / `uiDialogShow` / `uiDialogClose` / `uiDialogRename`\naddress (each also takes the `tdsDialogId`), and are also returned as\n`dialogId` by `externalAppsSet` for an entry it opened. For changes after\nthis snapshot, subscribe with `onDialogChanged`.",example:`payload:  { }
+response: { dialogs: [
+  { id: 'm3k9x-a1b2:0', kind: 'dialog', tdsDialogId: '7f0c…-…', appId: 'm3k9x-a1b2',
+    name: 'Projects', url: 'https://…/picker', hidden: false, closing: false },
+  { id: 'ext:q2w8e-r5t6:1', kind: 'panel', tdsDialogId: '3b1d…-…', appId: 'q2w8e-r5t6',
+    name: 'Report 42 — details', url: 'https://…/reports', hidden: false, closing: false } ] }`,sample:`const res = await client.uiDialogs();
+// res.data →
+{ dialogs: [
+  { id: 'm3k9x-a1b2:0', kind: 'dialog', tdsDialogId: '7f0c…-…', appId: 'm3k9x-a1b2',
+    name: 'Projects', url: 'https://…/picker', hidden: false, closing: false },
+  { id: 'ext:q2w8e-r5t6:1', kind: 'panel', tdsDialogId: '3b1d…-…', appId: 'q2w8e-r5t6',
+    name: 'Report 42 — details', url: 'https://…/reports', hidden: false, closing: false } ] }`},{name:`uiDialogHide`,command:`ui.dialog.hide`,suspect:null,signature:`uiDialogHide(id?: string): Promise<Result<{ id: string; hidden: boolean }>>`,doc:`Hide a dialog WITHOUT closing it: the iframe stays mounted, so its page
+keeps running and keeps its state (a half-filled form, a live session)
+and \`uiDialogShow\` brings it back exactly as it was — unlike closing,
+which drops the context. Park a dialog while a model loads, then either
+show it again or close it. Omit \`id\` from inside an embedded app to hide
+the dialog hosting it. Modal dialogs only — a panel id is a bad-payload
+error, a dock panel has no hidden state.`,example:`payload:  { id: 'm3k9x-a1b2:0' }
+response: { id: 'm3k9x-a1b2:0', hidden: true }`,sample:`const res = await client.uiDialogHide('m3k9x-a1b2:0');
+// res.data →
+{ id: 'm3k9x-a1b2:0', hidden: true }`},{name:`uiDialogShow`,command:`ui.dialog.show`,suspect:null,signature:`uiDialogShow(id?: string): Promise<Result<{ id: string; hidden: boolean }>>`,doc:`Re-show a hidden dialog (and raise it above the other dialogs).`,example:`payload:  { id: 'm3k9x-a1b2:0' }
+response: { id: 'm3k9x-a1b2:0', hidden: true }`,sample:`const res = await client.uiDialogShow('m3k9x-a1b2:0');
+// res.data →
+{ id: 'm3k9x-a1b2:0', hidden: true }`},{name:`uiDialogClose`,command:`ui.dialog.close`,suspect:null,signature:`uiDialogClose(
+  id?: string,
+  opts?: {
+    remove?: boolean;
+  }
+): Promise<Result<{
+  id: string;
+  closed: boolean;
+  removed: boolean;
+}>>`,doc:"Close a dialog or panel by id — its page is unmounted, its context lost;\n`remove: true` also forgets the instance for good (see `uiClose`). Omit\n`id` from inside an embedded app to close the dialog hosting it (the\nsame as `uiClose`).",example:`payload:  { id: 'ext:q2w8e-r5t6:1', remove: true }     // remove is optional
+response: { id: 'ext:q2w8e-r5t6:1', closed: true, removed: true }`,sample:`const res = await client.uiDialogClose('ext:q2w8e-r5t6:1', { remove: true });
+// res.data →
+{ id: 'ext:q2w8e-r5t6:1', closed: true, removed: true }`},{name:`uiDialogRename`,command:`ui.dialog.rename`,suspect:null,signature:`uiDialogRename(
+  title: string,
+  id?: string
+): Promise<Result<{
+  id: string;
+  title: string;
+}>>`,doc:"Retitle a dialog's title bar or a panel's tab — and the `name` that\n`uiDialogs` reports; the app entry's own name (the ribbon button) is\nuntouched. A report list that just opened one report can name itself\nafter it. `id` is the dialog / panel id or the page's own `tdsDialogId`;\nomit it from inside the page to rename whatever hosts the caller. Fires\n`dialog.changed` with `state: 'renamed'`.",example:`payload:  { id: '7f0c…-…', title: 'Report 42 — details' }     // tdsDialogId works as id
+response: { id: 'm3k9x-a1b2:0', title: 'Report 42 — details' }`,sample:`const res = await client.uiDialogRename('Report 42 — details', '7f0c…-…');
+// res.data →
+{ id: 'm3k9x-a1b2:0', title: 'Report 42 — details' }`},{name:`uiDialogHoldClose`,command:`ui.dialog.holdClose`,suspect:null,signature:`uiDialogHoldClose(
+  hold: boolean,
+  timeoutMs?: number,
+  id?: string
+): Promise<Result<{
+  id: string;
+  hold: boolean;
+  timeoutMs?: number;
+}>>`,doc:"Ask the viewer to tell THIS page before its dialog / panel is unmounted\n(`dialog.changed` with `state: 'closing'`) and to wait for\n`uiDialogReleaseClose` — or `timeoutMs` (default 3000, max 10000) —\nbefore dropping the iframe. The dialog / tab disappears at once either\nway; only the unmount waits. `onDialogClosing` wraps this — prefer it.\n`hold: false` lifts the request. The hold dies with the page.",example:`payload:  { hold: true, timeoutMs: 2000 }
+response: { id: 'ext:q2w8e-r5t6:1', hold: true, timeoutMs: 2000 }`,sample:`const res = await client.uiDialogHoldClose(true, 2000);
+// res.data →
+{ id: 'ext:q2w8e-r5t6:1', hold: true, timeoutMs: 2000 }`},{name:`uiDialogReleaseClose`,command:`ui.dialog.releaseClose`,suspect:null,signature:`uiDialogReleaseClose(
+  id?: string
+): Promise<Result<{
+  id: string;
+  released: boolean;
+}>>`,doc:"Done flushing: let a held close (see `uiDialogHoldClose`) finish now.\n`released` is false when no close was waiting.",example:`payload:  { }
+response: { id: 'ext:q2w8e-r5t6:1', released: true }`,sample:`const res = await client.uiDialogReleaseClose();
+// res.data →
+{ id: 'ext:q2w8e-r5t6:1', released: true }`},{name:`uiKiosk`,command:`ui.kiosk`,suspect:null,signature:`uiKiosk(on?: boolean): Promise<Result<{ kiosk: boolean }>>`,doc:"Toggle kiosk mode (viewport only — panels hidden). Omit `on` to query\nthe current state without changing it.",example:`payload:  { on: true }        // or {} to just query
+response: { kiosk: true }     // state after the call`,sample:`const res = await client.uiKiosk(true);
+// res.data →
+{ kiosk: true }     // state after the call`},{name:`uiTheme`,command:`ui.theme`,suspect:null,signature:`uiTheme(
+  theme?: 'dark' | 'light'
+): Promise<Result<{
+  theme: 'dark' | 'light';
+}>>`,doc:`Set the viewer's colour theme, or omit \`theme\` to query the current one
+without changing it. Handy for keeping an embedded viewer in step with the
+host page's light/dark mode.`,example:`payload:  { theme: 'light' }   // 'dark' | 'light'; or {} to just query
+response: { theme: 'light' }   // theme after the call`,sample:`const res = await client.uiTheme('light');
+// res.data →
+{ theme: 'light' }   // theme after the call`},{name:`uiClose`,command:`ui.close`,suspect:null,signature:`uiClose(
+  opts?: {
+    remove?: boolean;
+  }
+): Promise<Result<{
+  closed: boolean;
+  removed: boolean;
+}>>`,doc:"Ask the viewer to close the dialog/panel hosting THIS window (embedded\nexternal apps closing themselves, e.g. a project selector after pick).\n`remove: true` forgets the instance for good: the dock manager drops a\npanel's definition and remembered location once the close completes, and\nthe `tdsDialogId` is dropped so a later open under the same entry starts\nfresh — the natural end for one tab of a `multiple` app. A close hold\n(`onDialogClosing`) is honoured either way.",example:`payload:  { remove: true }              // optional — forget the instance for good
+response: { closed: true, removed: true }`,sample:`const res = await client.uiClose({ remove: true });
+// res.data →
+{ closed: true, removed: true }`},{name:`uiShowPanel`,command:`ui.showPanel`,suspect:null,signature:`uiShowPanel(panel: string): Promise<Result<{ shown: boolean }>>`,doc:`Open / close a dock panel by id (e.g. 'hierarchy').`,example:`payload:  { panel: 'hierarchy' }
+response: { shown: true }        // hidePanel → { hidden: true }`,sample:`const res = await client.uiShowPanel('hierarchy');
+// res.data →
+{ shown: true }        // hidePanel → { hidden: true }`},{name:`uiHidePanel`,command:`ui.hidePanel`,suspect:null,signature:`uiHidePanel(panel: string): Promise<Result<{ hidden: boolean }>>`,doc:`Hide a dock panel by id (counterpart of uiShowPanel).`,example:`payload:  { panel: 'hierarchy' }
+response: { shown: true }        // hidePanel → { hidden: true }`,sample:`const res = await client.uiHidePanel('hierarchy');
+// res.data →
+{ shown: true }        // hidePanel → { hidden: true }`},{name:`uiLoadingShow`,command:`ui.loading.show`,suspect:null,signature:`uiLoadingShow(
+  opts?: {
+    header?: string;
+    title?: string;
+  }
+): Promise<Result<Record<string, never>>>`,doc:"Show / hide the blocking loading overlay. `header` is the bold title line,\n`title` the message below it. Never queues behind another command, so it\ncan be called from the `onProgress` callback of a long import or query\nand appear while that work is still running.",example:`payload:  { header: 'Please wait', title: 'Loading project…' }   // hide: {}
+response: {}`,sample:`const res = await client.uiLoadingShow({ header: 'Please wait', title: 'Loading project…' });
+// res.data →
+{}`},{name:`uiLoadingHide`,command:`ui.loading.hide`,suspect:null,signature:`uiLoadingHide(): Promise<Result<Record<string, never>>>`,doc:`Hide the blocking loading overlay shown by uiLoadingShow. Skips
+the command queue for the same reason.`,example:`payload:  { header: 'Please wait', title: 'Loading project…' }   // hide: {}
+response: {}`,sample:`const res = await client.uiLoadingHide();
+// res.data →
+{}`},{name:`uiConfirm`,command:`ui.confirm`,suspect:null,signature:`uiConfirm(
+  opts: {
+    question: string;
+    header?: string;
+    yes?: string;
+    no?: string;
+  }
+): Promise<Result<{
+  confirmed: boolean;
+}>>`,doc:`Show a confirm dialog; resolves with the user's choice.`,example:`payload:  { question: 'Discard changes?', header: 'Confirm', yes: 'Discard', no: 'Keep' }
+response: { confirmed: true }`,sample:`const res = await client.uiConfirm({ question: 'Discard changes?', header: 'Confirm', yes: 'Discard', no: 'Keep' });
+// res.data →
+{ confirmed: true }`},{name:`uiError`,command:`ui.error`,suspect:null,signature:`uiError(
+  opts: {
+    title: string;
+    header?: string;
+  }
+): Promise<Result<Record<string, never>>>`,doc:"Show an error dialog. `title` is the message, `header` the bold title.",example:`payload:  { title: 'Import failed — see console.', header: 'Error' }
+response: {}`,sample:`const res = await client.uiError({ title: 'Import failed — see console.', header: 'Error' });
+// res.data →
+{}`}]},{ns:`externalApps`,methods:[{name:`externalAppsSet`,command:`externalApps.set`,suspect:null,signature:`externalAppsSet(
+  apps: HostExternalApp[]
+): Promise< Result<{
+  apps: {
+    id: string;
+    name: string;
+    url: string;
+    dialogId?: string;
+    tdsDialogId?: string;
+    warning?: string;
+  }[];
+  opened: number;
+}> >`,doc:"Declaratively set the SESSION-ONLY host-managed external apps: replaces\nany prior host-set entries with `apps` (user-configured Settings entries\nare untouched). Entries appear in the External ribbon; their origins get\npostMessage API access for this session. Nothing is persisted — a reload\ndrops them until the host calls this again after `app.ready`, so a viewer\nopened without its host has none. `openOnStart: true` opens that entry\nimmediately (panels/modals only — new-window entries are popup-blocked\nwithout a user gesture; a `multiple` entry opens a NEW instance per call,\na single-instance one re-focuses the open one); an entry opened that way reports its `dialogId`\n— a modal's dialog id or a panel's id — which `uiDialogClose` /\n`uiDialogRename` (and, for a modal, `uiDialogHide` / `uiDialogShow`)\naddress. Call\nwith `[]` to clear the host-set entries. An entry whose URL is on the\nVIEWER's own origin comes back with a `warning`: no sandbox isolates a\nsame-origin page from the viewer window, so only host pages you fully\ntrust belong there (a page on any other origin is isolated by the\nbrowser's same-origin policy regardless of `sandbox` / `allow`).\n\nGive entries a stable `id` (see HostExternalApp.id) when you\nre-set the apps for a new context — a project switch, say — so an open\ndialog of an app that stays in the set keeps running instead of turning\ninto an orphan. An entry opened by this call also reports the\n`tdsDialogId` its page sees on its URL (`?tdsDialogId=`), the value the\npage keys its saved state by across a close → reopen.",example:`payload:  { apps: [
+              { id: 'projects', name: 'Projects', url: 'https://portal.example.com/picker',
+                modal: true, openOnStart: true,
+                // width/height size the dialog (default 70% × 70%)
+                config: { width: '480px', height: '320px', project: 'plant-7' } },
+              { name: 'Docs', url: 'https://portal.example.com/docs', section: 'Portal',
+                // optional iframe policy — omit both for the base policy
+                sandbox: ['popups', 'storage-access'],
+                allow: ['clipboard-write', 'fullscreen'] },
+              // home: the button sits on the HOME ribbon, not External;
+              // homeAt picks which end of it ('start' default, or 'end')
+              { name: 'Project', url: 'https://portal.example.com/projects',
+                home: true, homeAt: 'start', section: 'Portal', modal: true } ] }
+response: { apps: [ { id: 'projects', name: 'Projects', url: 'https://…/picker',
+                      dialogId: 'projects:0',        // opened by this call (a panel: its 'ext:…' id)
+                      tdsDialogId: '7f0c…-…' },      // the ?tdsDialogId= its page sees
+                    { id: 'm3k9x-c3d4', name: 'Docs', url: 'https://…/docs' } ],
+            opened: 1 }
+// an entry on the viewer's own origin additionally carries
+//   warning: 'Same origin as the viewer: the page can read and change everything in this viewer window — …'`,sample:`const res = await client.externalAppsSet([
+              { id: 'projects', name: 'Projects', url: 'https://portal.example.com/picker',
+                modal: true, openOnStart: true,
+                config: { width: '480px', height: '320px', project: 'plant-7' } },
+              { name: 'Docs', url: 'https://portal.example.com/docs', section: 'Portal',
+                sandbox: ['popups', 'storage-access'],
+                allow: ['clipboard-write', 'fullscreen'] },
+              { name: 'Project', url: 'https://portal.example.com/projects',
+                home: true, homeAt: 'start', section: 'Portal', modal: true } ]);
+// res.data →
+{ apps: [ { id: 'projects', name: 'Projects', url: 'https://…/picker',
+                      dialogId: 'projects:0',        // opened by this call (a panel: its 'ext:…' id)
+                      tdsDialogId: '7f0c…-…' },      // the ?tdsDialogId= its page sees
+                    { id: 'm3k9x-c3d4', name: 'Docs', url: 'https://…/docs' } ],
+            opened: 1 }
+// an entry on the viewer's own origin additionally carries
+//   warning: 'Same origin as the viewer: the page can read and change everything in this viewer window — …'`},{name:`externalAppsList`,command:`externalApps.list`,suspect:null,signature:`externalAppsList(): Promise<Result<{ apps: ExternalAppInfo[] }>>`,doc:"List every configured external app — user-configured (Settings) and\nhost-set session entries alike, told apart by `hostManaged`.",example:`payload:  { }
+response: { apps: [
+  { id: 'k2j4…', name: 'Reports', url: 'https://…', section: '', size: 'medium',
+    multiple: false, newWindow: false, modal: false, openOnStart: false,
+    home: false, homeAt: 'start', sandbox: [], allow: ['clipboard-write'],
+    hostManaged: false },
+  { id: 'm3k9x-a1b2', name: 'Projects', url: 'https://…/picker', section: '',
+    size: 'medium', multiple: false, newWindow: false, modal: true,
+    openOnStart: true, home: true, homeAt: 'end', sandbox: [], allow: [],
+    hostManaged: true } ] }`,sample:`const res = await client.externalAppsList();
+// res.data →
+{ apps: [
+  { id: 'k2j4…', name: 'Reports', url: 'https://…', section: '', size: 'medium',
+    multiple: false, newWindow: false, modal: false, openOnStart: false,
+    home: false, homeAt: 'start', sandbox: [], allow: ['clipboard-write'],
+    hostManaged: false },
+  { id: 'm3k9x-a1b2', name: 'Projects', url: 'https://…/picker', section: '',
+    size: 'medium', multiple: false, newWindow: false, modal: true,
+    openOnStart: true, home: true, homeAt: 'end', sandbox: [], allow: [],
+    hostManaged: true } ] }`}]},{ns:`console`,methods:[{name:`consoleGet`,command:`console.get`,suspect:null,signature:`consoleGet(
+  opts?: {
+    levels?: ConsoleLevel[];
+    limit?: number;
+  }
+): Promise<Result<{
+  lines: ConsoleLine[];
+  rotated: number;
+}>>`,doc:"The Console panel's lines — the pinned startup block (welcome, version,\nGPU checks) and up to the last 1500 messages after it, oldest first.\n`levels` keeps only those kinds, `limit` the most recent N of what is\nleft; `rotated` is how many lines the panel has already dropped.",example:`payload:  { levels: ['warn', 'error'], limit: 100 }
+response: { lines: [{ id: 6, level: 'warn', text: 'no chromium-experimental-multi-draw-indirect — using vertex-pull culling' }], rotated: 0 }`,sample:`const res = await client.consoleGet({ levels: ['warn', 'error'], limit: 100 });
+// res.data →
+{ lines: [{ id: 6, level: 'warn', text: 'no chromium-experimental-multi-draw-indirect — using vertex-pull culling' }], rotated: 0 }`},{name:`consoleClear`,command:`console.clear`,suspect:null,signature:`consoleClear(): Promise<Result<{ cleared: number }>>`,doc:`Clear the Console — everything after the startup block goes, the block
+itself stays (the panel's own Clear). Returns how many lines went.`,example:`payload:  {}
+response: { cleared: 212 }`,sample:`const res = await client.consoleClear();
+// res.data →
+{ cleared: 212 }`},{name:`consoleAdd`,command:`console.add`,suspect:null,signature:`consoleAdd(
+  text: string,
+  level?: ConsoleLevel
+): Promise<Result<{
+  id: number;
+}>>`,doc:"Append a line to the Console; `level` defaults to `'info'`.",example:`payload:  { text: 'Host: sync finished', level: 'info' }
+response: { id: 391 }`,sample:`const res = await client.consoleAdd('Host: sync finished', 'info');
+// res.data →
+{ id: 391 }`}]},{ns:`instance`,methods:[{name:`instanceSet`,command:`instance.set`,suspect:null,signature:`instanceSet(
+  data: Record<string, unknown>,
+  opts?: {
+    merge?: boolean;
+  }
+): Promise<Result<{
+  data: Record<string, unknown>;
+}>>`,doc:`Replace (default) or merge the viewer's shared instance data — one JSON
+object per viewer window, for cross-dialog coordination. Every host gets
+an \`instance.changed\` event afterwards.`,example:`payload:  { data: { project: 'P-42', role: 'review' }, merge: false }
+response: { data: { project: 'P-42', role: 'review' } }   // state after the call
+// instance.get: payload {} → same response shape`,sample:`const res = await client.instanceSet({ project: 'P-42', role: 'review' }, { merge: false });
+// res.data →
+{ data: { project: 'P-42', role: 'review' } }   // state after the call
+// instance.get: payload {} → same response shape`},{name:`instanceGet`,command:`instance.get`,suspect:null,signature:`instanceGet(): Promise<Result<{ data: Record<string, unknown> }>>`,doc:`Read the viewer's shared instance data (see instanceSet).`,example:`payload:  { data: { project: 'P-42', role: 'review' }, merge: false }
+response: { data: { project: 'P-42', role: 'review' } }   // state after the call
+// instance.get: payload {} → same response shape`,sample:`const res = await client.instanceGet();
+// res.data →
+{ data: { project: 'P-42', role: 'review' } }   // state after the call
+// instance.get: payload {} → same response shape`}]},{ns:`custom`,methods:[{name:`customSubscribe`,command:`custom.subscribe`,suspect:null,signature:`customSubscribe(
+  handler: (e: CustomEventPayload) => void,
+  opts: CustomSubscribeOptions = {
+
+  }
+): Promise<Result<{
+  clientId: string;
+}>>`,doc:"Join the custom-event bus: whatever other connected pages post with\ncustomPost arrives at `handler` (a host page, its panels inside\nthe viewer and tabs the viewer opened can all talk to each other this\nway, through the viewer, without sharing an origin). Resolves to the id\nthe viewer gave this page. `name` and `tag` are what other pages see;\n`events` narrows what reaches you (an empty list = presence only).\nCall it again to change any of them — the latest call is the subscription; every handler\ngiven so far stays attached. Aborting `signal` drops that handler and\nleaves the bus when none remain. JSON only, about 1 MB per event.\nNot for secrets: everything passes through the viewer and reaches every\naddressed subscriber — for sensitive data talk to the other window\ndirectly with `postMessage` (`window.parent.parent`, `window.opener`,\nanswer on `event.source` after checking `event.origin`) — unless you\nhost the viewer yourself and have validated its origin allowlist and\nregistered apps, in which case the bus is as private as that list.",example:`payload:  { name: 'report-viewer', tag: 'reports-v2', events: ['row.pick', 'filter.changed'] }
+response: { clientId: 'c7' }`,sample:`const res = await client.customSubscribe(…, …);
+// res.data →
+{ clientId: 'c7' }`},{name:`customUnsubscribe`,command:`custom.unsubscribe`,suspect:null,signature:`customUnsubscribe(): Promise<Result<Record<string, never>>>`,doc:`Leave the bus: every handler given to customSubscribe is
+dropped and the viewer stops delivering to this page. Disposing the
+client (or the page going away) does the same.`,example:`payload:  {}
+response: {}`,sample:`const res = await client.customUnsubscribe();
+// res.data →
+{}`},{name:`customPost`,command:`custom.post`,suspect:null,signature:`customPost(
+  event: string,
+  data?: unknown,
+  opts?: {
+    to?: string | string[];
+  }
+): Promise<Result<CustomPostResult>>`,doc:"Post a custom event to the other subscribers — every one of them, or\njust the ids in `to` (from customClients or an earlier event's\n`from.id`). You never receive your own event. `data` must be JSON\n(about 1 MB at most); it arrives exactly as a JSON round trip leaves it.\nPosting does not require being subscribed. `missed` lists addressed ids\nthat did not get it. Not for secrets — coordination only; see\ncustomSubscribe.",example:`payload:  { event: 'row.pick', data: { tag: 'P-401', row: 12 }, to: ['c3', 'c9'] }
+response: { delivered: 1, missed: ['c9'] }`,sample:`const res = await client.customPost('row.pick', { tag: 'P-401', row: 12 }, { to: ['c3', 'c9'] });
+// res.data →
+{ delivered: 1, missed: ['c9'] }`},{name:`customClients`,command:`custom.clients`,suspect:null,signature:`customClients(): Promise<Result<CustomClientsResult>>`,doc:`Every page connected to this viewer — yours included, as \`self\` — with
+its kind, origin, chosen name and whether it is on the bus. Pages that
+never subscribed are listed too, so a host can see its panels; only
+subscribed ones can be posted to.`,example:`payload:  {}
+response: { self: 'c1', clients: [
+  { id: 'c1', origin: 'https://portal.example.com', kind: 'parent', name: 'portal', subscribed: true },
+  { id: 'c7', origin: 'https://reports.example.com', kind: 'panel', dialog: 'ext-reports', name: 'report-viewer', tag: 'reports-v2', subscribed: true },
+  { id: 'c8', origin: 'https://reports.example.com', kind: 'panel', dialog: 'ext-detail', subscribed: false },
+] }`,sample:`const res = await client.customClients();
+// res.data →
+{ self: 'c1', clients: [
+  { id: 'c1', origin: 'https://portal.example.com', kind: 'parent', name: 'portal', subscribed: true },
+  { id: 'c7', origin: 'https://reports.example.com', kind: 'panel', dialog: 'ext-reports', name: 'report-viewer', tag: 'reports-v2', subscribed: true },
+  { id: 'c8', origin: 'https://reports.example.com', kind: 'panel', dialog: 'ext-detail', subscribed: false },
+] }`}]}],types:[{name:`TredespaceErrorCode`,kind:`alias`,doc:"Failure codes: the eight protocol codes the viewer can return, plus two\nhost-side ones — a request that timed out, or a dead transport (disposed\nclient / no viewer window). `unknown-command` means this viewer version\nhas no such command — feature-detect with TredespaceClient.supports.\n`busy` means the command never ran (the import lock was held) so a retry is\nsensible; `download` and `sql` are caller errors — a URL that could not be\nfetched and a statement SQLite rejected — which used to arrive as\n`internal` and look like viewer bugs; `cancelled` answers a command the\ncaller aborted (an `AbortSignal`, or a timeout — both tell the viewer to\nstop).",def:`| 'bad-payload' | 'not-ready' | 'busy' | 'not-found' | 'download' | 'sql' | 'cancelled' | 'internal' | 'unknown-command' | 'timeout' | 'transport'`},{name:`TredespaceError`,kind:`interface`,doc:"Failure detail on a Result. `msg` is a human-readable string safe to\nshow a user; `err` is the underlying detail when there is one (the raw wire\nerror, or a caught exception).",fields:[{text:`code: TredespaceErrorCode;`,doc:``},{text:`msg: string;`,doc:``},{text:`err?: unknown;`,doc:``}]},{name:`Result`,kind:`interface`,doc:"Rust-style result — exactly one of `data` / `error` is present. Command\nmethods resolve this and NEVER throw; check `error` (or `data`).\n\n```ts\nconst res = await client.selectionSet(['/SITE/PIPE-01']);\nif (res.error) console.warn(res.error.msg);\nelse console.log(res.data.matched);\n```",fields:[{text:`data?: T;`,doc:``},{text:`error?: TredespaceError;`,doc:``}]},{name:`GpuState`,kind:`alias`,doc:"The viewer's GPU state as far as the API can tell: the viewport boots in\nparallel with the API, so `app.ready` usually reports `booting`;\nTredespaceClient.appInfo gives the current answer and `app.error`\nreports a failure.",def:`'booting' | 'ok' | 'failed'`},{name:`AppReady`,kind:`interface`,doc:"Payload of `app.ready` and response of `app.info`: the viewer version, the\nprotocol number, every command and event this viewer has (what\nTredespaceClient.supports answers from) and the GPU state.",fields:[{text:`version: string;`,doc:``},{text:`api: number;`,doc:``},{text:`commands: string[];`,doc:``},{text:`events: string[];`,doc:``},{text:`gpu: GpuState;`,doc:``}]},{name:`AppErrorEvent`,kind:`interface`,doc:"Payload of `app.error`: the viewer keeps answering commands (SQL, assets,\nthe bus…) but its viewport is gone — WebGPU failed to initialise\n(`gpu-init`), the device was lost (`gpu-lost`), or a recovery attempt\nfailed (`gpu-recovery`). Only a reload brings rendering back.",fields:[{text:`code: 'gpu-init' | 'gpu-lost' | 'gpu-recovery';`,doc:``},{text:`message: string;`,doc:``}]},{name:`AppByeEvent`,kind:`interface`,doc:"Payload of `app.bye`: the viewer page is unloading (reload, navigation,\ntab close) or entering the back-forward cache.",fields:[{text:`reason: 'unload';`,doc:``}]},{name:`FitVisibleBounds`,kind:`alias`,doc:"What `nav.fitVisible` frames while clip volumes are on: `visible`\n(default) = the visible box cut down to the volumes' envelope; `bbox` =\nthe volumes' envelope itself.",def:`'visible' | 'bbox'`},{name:`SelectionSetResult`,kind:`interface`,doc:``,fields:[{text:`matched: number;`,doc:``},{text:`missed: string[];`,doc:``}]},{name:`SelectionGetResult`,kind:`interface`,doc:``,fields:[{text:`count: number;`,doc:`selected items (children included)`},{text:`fullnames: string[];`,doc:`selection ROOTS as fullnames — what was clicked / set; a tree root
+stands for its whole subtree. Empty after invert or a viewport
+rectangle select, which have no roots — use \`items\` for those.`},{text:`items?: string[];`,doc:`with { items: true }: every selected NODE's fullname — the leaves and
+the grouping entries above them (every row the tree highlights, not
+just the roots) — because the real tag is often on a parent row and
+which level varies per model; minus \`skip\` prefixes, capped at
+maxItems (default 10 000)`},{text:`itemCount?: number;`,doc:`with { items: true }: the true number of selected nodes (after skip)`},{text:`truncated?: boolean;`,doc:"with { items: true }: `items` was cut at maxItems"},{text:`parents?: string[];`,doc:"with { parents: true }: every ancestor of a selected node — the rows\nabove the selection up to each model root, partially and fully selected\nalike, then the model's import folders as cumulative `folder` paths\n(`'plant'`, `'plant/area-1'`, no leading slash) — each once (a Set),\nminus `skip` prefixes, uncapped. Independent of `items`; a fully\nselected assembly appears in both."}]},{name:`SelectionGetOptions`,kind:`interface`,doc:``,fields:[{text:`items?: boolean;`,doc:`also return every selected node's fullname (grouping entries and
+leaves, children included)`},{text:`skip?: string[];`,doc:"drop nodes whose name STARTS WITH any of these (case-insensitive; a\ntrailing `*` is accepted): `['FRAME', 'BRACKET*']`"},{text:`maxItems?: number;`,doc:"cap for `items` (default 10 000) — a whole-model selection can be\nhundreds of thousands of names"},{text:`parents?: boolean;`,doc:`also return every ancestor of the selection (each once), import
+folders included — the levels above what was selected, where a tag is
+often carried`}]},{name:`SphereMarker`,kind:`interface`,doc:`A wireframe sphere drawn IN the scene at an annotation's point (a label's
+anchor, every point of a measurement) — depth tested against the model, so
+the point reads at its true depth, unlike the flat overlay glyphs.`,fields:[{text:`size: number;`,doc:`radius, metres`},{text:`color: string;`,doc:"`#rrggbb`"},{text:`solid?: boolean;`,doc:"filled sphere (shaded, `opacity` applies) instead of a wireframe;\ndefault false"},{text:`opacity?: number;`,doc:`fill opacity 0..1 for a solid sphere; 1 = opaque (writes depth);
+default 0.6`}]},{name:`LabelInput`,kind:`interface`,doc:``,fields:[{text:`text?: string;`,doc:`shown text — supports **bold** and newlines in rich mode. Omit it with a
+\`fullname\` to label the item by its own name (what the panel's tag import
+does); a point-anchored label without text is blank.`},{text:`fullname?: string;`,doc:`anchor to a model item by fullname (bounds centre)…`},{text:`stripSlash?: boolean;`,doc:`when the text comes from \`fullname\`, drop the model's leading '/' from
+what is SHOWN — the label still links to the full name, so selection and
+colouring match. Omitted = the Labels panel's "Label text without
+leading /" toggle. Ignored when \`text\` is given.`},{text:`anchor?: [number, number, number];`,doc:`…or at an explicit world-space point`},{text:`snap?: boolean;`,doc:`\`fullname\` anchors only: when the subtree's bounds centre falls in empty
+air (a bent pipe run, an L-shaped assembly), anchor on the nearest child
+item's centre instead; omitted = the Labels panel's "Snap to item"`},{text:`bg?: string;`,doc:"background colour, `'#rrggbb'` or a CSS colour name; omitted = the\nLabels panel's current style"},{text:`textColor?: string;`,doc:"text colour, same forms as `bg`; omitted = the panel style"},{text:`opacity?: number;`,doc:`0-1; omitted = the panel style`},{text:`offset?: [number, number];`,doc:`screen-px displacement from the anchor — what dragging the label in the
+viewport produces. Non-zero draws a leader line back to the anchor.`},{text:`leaderColor?: string;`,doc:"leader-line (and border) colour for THIS label, same forms as `bg`;\nomitted = the panel's leader colour"},{text:`sphere?: SphereMarker | true | null;`,doc:"3D sphere marker at the anchor; `true` = the Labels panel's current\nmarker; omitted = the panel style (usually none); `null` = none"}]},{name:`LabelsResult`,kind:`interface`,doc:``,fields:[{text:`added: number;`,doc:``},{text:`missed: string[];`,doc:`fullnames that resolved to nothing`}]},{name:`LabelInfo`,kind:`interface`,doc:`One scene label as TredespaceClient.labelsGet reports it.`,fields:[{text:`id: number;`,doc:``},{text:`text: string;`,doc:``},{text:`fullname: string | null;`,doc:`the linked item, or null for a hand-placed / point-anchored label`},{text:`anchor: [number, number, number];`,doc:``},{text:`offset: [number, number];`,doc:`screen-px displacement after the user dragged it (a leader line is drawn)`},{text:`bg: string;`,doc:``},{text:`opacity: number;`,doc:``},{text:`textColor: string;`,doc:``},{text:`leaderColor: string | null;`,doc:`per-label leader/border colour, or null when it follows the panel's`},{text:`sphere: SphereMarker | null;`,doc:``},{text:`muted: boolean;`,doc:`hidden in the viewport by the panel's per-label mute`}]},{name:`MeasurePointInput`,kind:`interface`,doc:``,fields:[{text:`pos: [number, number, number];`,doc:``}]},{name:`MeasurementInput`,kind:`interface`,doc:``,fields:[{text:`kind: 'point' | 'line' | 'path' | 'area' | 'diameter' | 'angle';`,doc:``},{text:`points: MeasurePointInput[];`,doc:``},{text:`label?: string;`,doc:`name shown above the value — newlines and **bold** spans allowed`},{text:`sphere?: SphereMarker | true;`,doc:"3D sphere marker at every point; `true` = the Measurements panel's\nConfig default"}]},{name:`FilterRowInput`,kind:`interface`,doc:``,fields:[{text:`op: 'append' | 'remove';`,doc:``},{text:`mode: 'contains' | 'single' | 'multi' | 'starts' | 'ends' | 'wildcard';`,doc:"contains | single (equals, * at start/end) | starts | ends |\nwildcard (equals, * anywhere) | multi (one name per line — a line may\ncarry its own colour after a TAB/space/comma: `name<TAB>#ff0000:50`,\ncolour[:opacity 0-100], `default` = original colour)"},{text:`value: string;`,doc:``},{text:`comment?: string;`,doc:``},{text:`level?: number;`,doc:`Hierarchy level (1-9) the filter is applied TO, counted like the tree
+panel (import folders included): the row matches only the names at that
+level and each match includes its whole subtree. Level 1 tests the
+import-folder name (a hit takes everything under the folder).
+0/omitted = match at any level.`}]},{name:`ColorRuleInput`,kind:`interface`,doc:``,fields:[{text:`comment?: string;`,doc:``},{text:`enabled?: boolean;`,doc:``},{text:`filters: FilterRowInput[];`,doc:``},{text:`color: string | null;`,doc:"`'#rrggbb'` or a CSS colour name (TredespaceClient.colorsNames\nlists them — stored as hex); null or `'default'` = restore the original\ncolour. Anything else is rejected with `bad-payload`."},{text:`opacity?: number;`,doc:`0-1, 1 = default`},{text:`store?: string;`,doc:`Scope the rule to the models loaded from this store (a known store
+name); omitted/'' = every store. Keeps a rule set safe when stores hold
+same-named models. An unknown name is rejected (not-found).`}]},{name:`ClipShapeInput`,kind:`interface`,doc:`A clip shape to append (sphere / cylinder / box). Only \`kind\` is required;
+the rest default (center [0,0,0], radius 5, height 10, box halfExtents
+[1,1,1], identity rotation, enabled, not inverted).`,fields:[{text:`kind: 'sphere' | 'cylinder' | 'box';`,doc:``},{text:`label?: string;`,doc:``},{text:`center?: [number, number, number];`,doc:``},{text:`axis?: [number, number, number];`,doc:``},{text:`radius?: number;`,doc:``},{text:`height?: number;`,doc:``},{text:`halfExtents?: [number, number, number];`,doc:``},{text:`rotation?: [number, number, number, number];`,doc:``},{text:`enabled?: boolean;`,doc:``},{text:`inverted?: boolean;`,doc:`clip INSIDE the shape (a hole) instead of outside`},{text:`showHelper?: boolean;`,doc:``}]},{name:`ClipBoxState`,kind:`interface`,doc:`The default clipping box, from TredespaceClient.clipBoxGet.`,fields:[{text:`enabled: boolean;`,doc:`true when the box is actually cutting: global clipping on AND the box itself on`},{text:`inverted: boolean;`,doc:`cut INSIDE the box (a hole) instead of outside`},{text:`min: [number, number, number];`,doc:`world-space axis-aligned bounds — exact for an unrotated box, the
+envelope of its 8 corners otherwise`},{text:`max: [number, number, number];`,doc:``},{text:`center: [number, number, number];`,doc:`the exact oriented box`},{text:`size: [number, number, number];`,doc:``},{text:`rotation: [number, number, number, number];`,doc:``}]},{name:`ColorRulesResult`,kind:`interface`,doc:``,fields:[{text:`rules: number;`,doc:``},{text:`ran: boolean;`,doc:``},{text:`matches: number[];`,doc:``}]},{name:`ModelResetOptions`,kind:`interface`,doc:``,fields:[{text:`color?: boolean;`,doc:`drop every color override`},{text:`opacity?: boolean;`,doc:`drop every opacity override`},{text:`hidden?: boolean;`,doc:`unhide every hidden item`},{text:`transform?: boolean;`,doc:`put every moved item back on its cooked placement`}]},{name:`ConsoleLevel`,kind:`alias`,doc:``,def:`'info' | 'warn' | 'error'`},{name:`ConsoleLine`,kind:`interface`,doc:`One Console panel line, from TredespaceClient.consoleGet.`,fields:[{text:`id: number;`,doc:``},{text:`level: ConsoleLevel;`,doc:``},{text:`text: string;`,doc:``}]},{name:`ModelResetResult`,kind:`interface`,doc:"Which kinds `model.reset` actually reset (an empty request resets all).",fields:[{text:`color: boolean;`,doc:``},{text:`opacity: boolean;`,doc:``},{text:`hidden: boolean;`,doc:``},{text:`transform: boolean;`,doc:``}]},{name:`SettingsGetResult`,kind:`interface`,doc:``,fields:[{text:`version: string;`,doc:``},{text:`viewer: Record<string, unknown>;`,doc:`the persisted viewer-settings snapshot (read-only)`}]},{name:`RenderingSettings`,kind:`interface`,doc:`Settings → Rendering, key for key: antialiasing, culling, picking, the
+VRAM budget, background & selection, outline, transparency, dark colours
+and the debug views. Colours are '#rrggbb'.`,fields:[{text:`fastAA: boolean;`,doc:`accumulation TAA (off = MSAA only, converges instantly)`},{text:`aaSamples: number;`,doc:`TAA/AO accumulation target (frames)`},{text:`msaa4x: boolean;`,doc:`4× MSAA`},{text:`pixelRatio: number;`,doc:`render scale, canvas px per CSS px — ignored while a DPR mode below is on`},{text:`useDevicePixelRatio: boolean;`,doc:`follow window.devicePixelRatio instead of pixelRatio`},{text:`smartPixelRatio: boolean;`,doc:`smart render scale: 1 on mobile, native DPR on desktop (overrides both above)`},{text:`fpsLimit: number;`,doc:`render-loop cap, frames per second`},{text:`freezeCull: boolean;`,doc:`debug: stop updating the cull result`},{text:`protectDist: number;`,doc:`metres around the camera never pixel-culled`},{text:`pxCut: number;`,doc:`pixel-size cut while the camera moves (px)`},{text:`pxCutEnabled: boolean;`,doc:``},{text:`pxCutAlways: number;`,doc:`always-on floor for the pixel cut (px, 0 = off): meshlets that stay
+under this projected radius are dropped with the camera at rest too`},{text:`newMeshletCap: number;`,doc:`max meshlets the occlusion pass may newly draw in one frame (0 = no
+cap) — spreads the frame after a mass unhide over several cheaper ones`},{text:`settleFrames: number;`,doc:`frames to keep rendering after the view settles so a capped backlog
+finishes arriving; AA frames count toward it, not on top (0 = off)`},{text:`vertexPull: boolean;`,doc:`cull + draw via vertex pulling (core WebGPU) instead of multi-draw indirect`},{text:`pickOpacityPct: number;`,doc:`pick threshold %: items at/above are clickable, below pass through`},{text:`vramBudgetOn: boolean;`,doc:`the VRAM budget switch`},{text:`maxVramMb: number;`,doc:`the budget's ceiling in MB while on`},{text:`vramSwapSpeed: 'relaxed' | 'normal' | 'fast';`,doc:`how aggressively the budget swaps`},{text:`vramDebugBoxes: boolean;`,doc:`debug: colour each zone by residency`},{text:`vramCutSizeM: number;`,doc:`budget cut: items smaller than this (m) and farther than vramCutDistM are dropped; 0 = off`},{text:`vramCutDistM: number;`,doc:`budget cut: distance (m) beyond which tiny items are dropped`},{text:`vramDropHidden: boolean;`,doc:`budget cut: drop hidden items from budget packs`},{text:`vramActivityHud: boolean;`,doc:`the small viewport chip showing what the budget is doing`},{text:`vramHoldAccum: boolean;`,doc:`single-sample frames while a swap burst lands, converge once at the end`},{text:`bgColor: string;`,doc:`canvas background`},{text:`selectionColor: string;`,doc:`selection tint`},{text:`selectionStyle: 'tint' | 'outline' | 'both';`,doc:`how a selection is shown`},{text:`outlineHover: boolean;`,doc:`outline the item under the cursor`},{text:`outlineStrength: number;`,doc:`outline edge intensity 0-10`},{text:`outlineGlow: number;`,doc:`wide soft glow 0-1`},{text:`outlineThickness: number;`,doc:`blur radius 1-4 px`},{text:`outlinePulse: number;`,doc:`pulse period in seconds, 0 = off`},{text:`outlineVisibleColor: string;`,doc:``},{text:`outlineHiddenColor: string;`,doc:`the occluded part of the silhouette`},{text:`transparencyBlend: boolean;`,doc:`true = unsorted blend pass, false = alpha hash (converges under TAA)`},{text:`transparencyBackdrop: boolean;`,doc:`blend variant: transparent items render solid as a backdrop behind everything opaque`},{text:`backdropFadePct: number;`,doc:`how far (%) a backdrop item's colour moves toward the background`},{text:`darkLift: boolean;`,doc:`render pure-black materials as grey so they show shading`},{text:`darkLiftPct: number;`,doc:`the grey level (% luma) black is rendered at`},{text:`meshletVis: boolean;`,doc:`debug: colour by meshlet`},{text:`debugBuf: 0 | 1 | 2 | 3 | 4 | 5;`,doc:`debug buffer view: off / normal / depth / item id / edge / ao`}]},{name:`LightingSettings`,kind:`interface`,doc:`Settings → Lighting: the shaded scene's ambient + headlight and the
+sketch mode's own pair. Colours are '#rrggbb'.`,fields:[{text:`ambientColor: string;`,doc:``},{text:`ambientIntensity: number;`,doc:``},{text:`headlightColor: string;`,doc:``},{text:`headlightIntensity: number;`,doc:``},{text:`sketchAmbientColor: string;`,doc:``},{text:`sketchAmbientIntensity: number;`,doc:``},{text:`sketchHeadlightColor: string;`,doc:``},{text:`sketchHeadlightIntensity: number;`,doc:``}]},{name:`EdgesSettings`,kind:`interface`,doc:`Settings → Edges: the common switches, the flat-shaded and the
+authored-normal tuning, and sketch mode's own edge + cube look.
+Colours are '#rrggbb'.`,fields:[{text:`geoEdges: boolean;`,doc:`edge lines at geometric creases`},{text:`itemEdges: boolean;`,doc:`edge lines at item boundaries`},{text:`edgeColor: string;`,doc:``},{text:`whiteOnDark: boolean;`,doc:`draw white edges on dark surfaces`},{text:`darkThr: number;`,doc:`luma below which a surface counts as dark (0-1)`},{text:`flatMeshEdges: boolean;`,doc:`edge lines on flat-shaded meshes`},{text:`fadeExp: number;`,doc:``},{text:`depthThr: number;`,doc:``},{text:`normalThr: number;`,doc:``},{text:`smoothMeshEdges: boolean;`,doc:`edge lines on meshes with authored normals`},{text:`smoothFadeExp: number;`,doc:``},{text:`smoothDepthThr: number;`,doc:``},{text:`smoothNormalThr: number;`,doc:``},{text:`sketchEdgeColor: string;`,doc:``},{text:`sketchFadeExp: number;`,doc:``},{text:`sketchDepthThr: number;`,doc:``},{text:`sketchNormalThr: number;`,doc:``},{text:`sketchRespectsEdgesOff: boolean;`,doc:`sketch mode honours the edges-off switches (default: sketch always draws)`},{text:`sketchColorMode: 'off' | 'fill' | 'edges';`,doc:`sketch colour-from-mesh: off = paper + ink; fill = washed surfaces (hue
+for coloured ones, their own grey level for colourless ones); edges =
+coloured ink, colourless meshes keeping the plain sketch ink`},{text:`sketchFillPct: number;`,doc:"`fill` mode only: how far the paper moves from white toward the surface\ncolour, in percent (0 = plain paper, 100 = the hue at full strength)"},{text:`sketchCubeFaceColor: string;`,doc:``},{text:`sketchCubeLineColor: string;`,doc:``},{text:`sketchCubeTextColor: string;`,doc:``},{text:`sketchCubeHoverColor: string;`,doc:``}]},{name:`AoSettings`,kind:`interface`,doc:`Settings → Ambient Occlusion.`,fields:[{text:`aoMode: 0 | 1 | 2;`,doc:`0 off, 1 while moving too, 2 at rest only`},{text:`aoRadius: number;`,doc:`world-space radius (m)`},{text:`aoStrength: number;`,doc:``},{text:`aoSlices: number;`,doc:``},{text:`aoSamples: number;`,doc:``}]},{name:`GizmoLabels`,kind:`alias`,doc:`The six view-cube faces and their names (at most 5 characters each).`,def:`Record<'front' | 'back' | 'left' | 'right' | 'top' | 'bottom', string>`},{name:`GizmoSettings`,kind:`interface`,doc:`Settings → Gizmo: the view cube's colours ('#rrggbb') and face names.`,fields:[{text:`cubeFaceColor: string;`,doc:``},{text:`cubeLineColor: string;`,doc:``},{text:`cubeTextColor: string;`,doc:``},{text:`cubeHoverColor: string;`,doc:``},{text:`labels: GizmoLabels;`,doc:``}]},{name:`SettingsPatch`,kind:`alias`,doc:"A settings setter's payload: any subset of the tab's keys, plus `reset`\nto return the whole tab to defaults before the subset applies.",def:`Partial<T> & { reset?: boolean }`},{name:`GpuAdapterInfo`,kind:`interface`,doc:'What `GPUAdapter.info` says about one physical adapter. Chrome fills in\n`device` and `description` only with "WebGPU Developer Features" on;\nvendor + architecture are always there (e.g. nvidia/ampere).',fields:[{text:`vendor: string;`,doc:``},{text:`architecture: string;`,doc:``},{text:`device: string;`,doc:``},{text:`description: string;`,doc:``},{text:`isFallback: boolean;`,doc:`a software rasterizer (SwiftShader), not a GPU`}]},{name:`GpuInfo`,kind:`interface`,doc:``,fields:[{text:`active: GpuAdapterInfo;`,doc:`the adapter the viewer is rendering on`},{text:`adapters: { 'high-performance': GpuAdapterInfo | null; 'low-power': GpuAdapterInfo | null; fallback: GpuAdapterInfo | null; };`,doc:`what each adapter hint resolves to on this machine (null = none)`},{text:`hasMultipleGpus: boolean;`,doc:`the high-performance and low-power hints resolved to different adapters`},{text:`features: { multiDrawIndirect: boolean; timestampQuery: boolean };`,doc:`optional WebGPU features the viewer got`},{text:`cullMode: 'mdi' | 'vp' | 'full';`,doc:`the draw path in use: multi-draw indirect, vertex pull, or full`},{text:`limits: { maxBufferSize: number; maxStorageBufferBindingSize: number };`,doc:`what the adapter offers (bytes)`},{text:`deviceMemoryGb: number;`,doc:`system RAM in GB as the browser reports it (Chromium caps at 8), 0 when unknown`},{text:`isMobile: boolean;`,doc:``}]},{name:`AssetInfo`,kind:`interface`,doc:``,fields:[{text:`id: string;`,doc:``},{text:`meta?: Record<string, unknown>;`,doc:"whatever `meta` the import attached — your own bookkeeping, returned\nverbatim (e.g. the md5 of the COMPRESSED artifact you serve)"},{text:`store: string;`,doc:`the store this asset belongs to (default 'main')`},{text:`name: string;`,doc:``},{text:`folder: string;`,doc:``},{text:`fileName: string;`,doc:``},{text:`md5?: string;`,doc:`MD5 of the source bytes — compare to decide whether to re-import`},{text:`size: number;`,doc:``},{text:`kind?: 'merged' | 'standard';`,doc:``},{text:`hasNormals?: boolean;`,doc:``},{text:`edges?: boolean;`,doc:``},{text:`loaded: boolean;`,doc:``}]},{name:`StoreInfo`,kind:`interface`,doc:`A store = a named group of assets (a project). 'main' always exists.`,fields:[{text:`name: string;`,doc:``},{text:`description: string;`,doc:``},{text:`count: number;`,doc:"everything the store holds: `modelCount + sqlCount`"},{text:`modelCount: number;`,doc:`model assets in the store`},{text:`sqlCount: number;`,doc:`SQL databases in the store`}]},{name:`ImportFormat`,kind:`alias`,doc:`Conversion pipeline for an imported file. \`tdp\` is an already-cooked
+TreDeSpace file (e.g. a viewer export or a server-hosted model): it is
+stored as-is — no conversion — with its coarse (VRAM-budget) variant
+rebuilt in-app and its recorded md5 being the hash of the \`.tdp\` bytes
+themselves.`,def:`'glb-merged' | 'glb-standard' | 'rvm' | 'ifc' | 'step' | 'tdp'`},{name:`AssetsImportResult`,kind:`interface`,doc:``,fields:[{text:`entries: AssetInfo[];`,doc:``},{text:`replaced: number;`,doc:"how many prior assets were removed by `replace` (0 unless replace was set)"}]},{name:`ScreenshotBytes`,kind:`interface`,doc:`TredespaceClient.viewScreenshot by default: the PNG as raw bytes,
+transferred (never copied, never base64).`,fields:[{text:`bytes: ArrayBuffer;`,doc:``},{text:`mime: string;`,doc:"always `image/png` today"},{text:`width: number;`,doc:``},{text:`height: number;`,doc:``}]},{name:`ScreenshotDataUrl`,kind:`interface`,doc:"TredespaceClient.viewScreenshot with `{ dataUrl: true }`.",fields:[{text:`dataUrl: string;`,doc:``},{text:`mime: string;`,doc:``},{text:`width: number;`,doc:``},{text:`height: number;`,doc:``}]},{name:`ImportUrlFile`,kind:`interface`,doc:"One file for TredespaceClient.assetsImportUrl: a URL the VIEWER\ndownloads itself, plus the pipeline to cook it with. `format` is required\n(a `.glb` URL is ambiguous — merged vs standard — so no format is inferred\non the wire; infer it host-side from the extension if you like).",fields:[{text:`url: string;`,doc:`URL the viewer fetches (subject to the VIEWER origin's CORS, not yours).`},{text:`format: ImportFormat;`,doc:``},{text:`meta?: Record<string, unknown>;`,doc:"metadata to store with the produced asset(s) and read back from\n`assetsList` — a converter that yields several assets tags them all"},{text:`fileName?: string;`,doc:`name to store the asset under; defaults to the URL's last path segment.`},{text:`folder?: string;`,doc:``},{text:`options?: Record<string, unknown>;`,doc:"per-format options, e.g. `{ normals: true, edges: true }` for glb-standard."}]},{name:`AssetsImportUrlEntry`,kind:`interface`,doc:`Per-file outcome within an AssetsImportUrlResult. Exactly one batch
+entry per input file, in input order; a failure here never aborts the rest.`,fields:[{text:`url: string;`,doc:``},{text:`ok: boolean;`,doc:``},{text:`entries?: AssetInfo[];`,doc:"assets produced (present when `ok`)."},{text:`replaced?: number;`,doc:"prior assets removed by `replace` for this file (present when `ok`)."},{text:`error?: string;`,doc:"why this file failed (present when not `ok`) — download or convert error."}]},{name:`AssetsImportUrlResult`,kind:`interface`,doc:``,fields:[{text:`imported: number;`,doc:`number of files that imported successfully.`},{text:`failed: number;`,doc:`number of files that failed (download or convert).`},{text:`results: AssetsImportUrlEntry[];`,doc:``}]},{name:`ImportUrlProgress`,kind:`interface`,doc:"Progress tick for one file in an TredespaceClient.assetsImportUrl\nbatch. Files run in parallel, so ticks for several `index`es interleave —\nkey your UI on `index` (its position in the `files` array you passed), not\non arrival order. `completed`/`total` count whole files across the batch.",fields:[{text:`completed: number;`,doc:``},{text:`total: number;`,doc:``},{text:`index: number;`,doc:"index into the `files` array this tick belongs to"},{text:`url: string;`,doc:``},{text:`phase: 'download' | 'convert' | 'done' | 'error';`,doc:"`download` repeats as bytes arrive; `convert` once the cook starts;\n`done` / `error` end that file."},{text:`loaded?: number;`,doc:`bytes downloaded so far (download phase only)`},{text:`totalBytes?: number;`,doc:`total bytes, when the server sent a content-length (download phase only)`}]},{name:`SqlDbInfo`,kind:`interface`,doc:"One SQLite database in OPFS (`sql_assets/<store>/<file>`). Stores are shared\nwith model assets. `path` is what you pass as `mainDb` to `sqlQuery`, and\nwhat an ATTACH string literal references.",fields:[{text:`store: string;`,doc:``},{text:`meta?: Record<string, unknown>;`,doc:"whatever `meta` the import attached, returned verbatim"},{text:`fileName: string;`,doc:``},{text:`path: string;`,doc:``},{text:`size: number;`,doc:``},{text:`modified: number;`,doc:``},{text:`md5?: string;`,doc:`MD5 of the source bytes AS DELIVERED at import time — compare against a
+hash of the hosted file to decide whether to re-import. Recorded before
+the WAL normalization rewrites the stored file and never updated by
+later in-app edits. Absent for databases imported before this existed or
+created in-app.`}]},{name:`SqlImportResult`,kind:`interface`,doc:``,fields:[{text:`imported: string[];`,doc:`OPFS paths of the databases written.`},{text:`skipped: string[];`,doc:"file names skipped — already existed without `replace`, or the file was locked."},{text:`replaced: number;`,doc:`how many existing databases were overwritten.`}]},{name:`SqlImportUrlFile`,kind:`interface`,doc:`One file for TredespaceClient.sqlImportUrl: a URL the VIEWER
+downloads itself, streamed straight into OPFS.`,fields:[{text:`url: string;`,doc:`URL the viewer fetches (subject to the VIEWER origin's CORS, not yours).`},{text:`fileName?: string;`,doc:`name to store the database under; defaults to the URL's last path segment.`},{text:`meta?: Record<string, unknown>;`,doc:"metadata to store with it and read back from `sqlList`"}]},{name:`SqlImportProgress`,kind:`interface`,doc:'Progress tick for a SQL import. `download` repeats as bytes arrive (URL\nimports), `import` = writing into OPFS + the WAL normalization, then\n`done` / `error`. Files are imported one at a time, so `completed`/`total`\ngive you "fetching file X of Y" and `loaded`/`totalBytes` the percentage.',fields:[{text:`completed: number;`,doc:``},{text:`total: number;`,doc:``},{text:`index: number;`,doc:"index into the `files` array you passed"},{text:`fileName: string;`,doc:``},{text:`url?: string;`,doc:`the URL being fetched (URL imports only)`},{text:`phase: 'download' | 'import' | 'done' | 'error';`,doc:``},{text:`loaded?: number;`,doc:`bytes downloaded so far (download phase)`},{text:`totalBytes?: number;`,doc:`total bytes, when the server sent a content-length`}]},{name:`SqlImportUrlResult`,kind:`interface`,doc:``,fields:[{text:`failed: { url: string; error: string }[];`,doc:`files whose download or write failed — never aborts the rest of the batch.`}]},{name:`ExternalAppSandboxOption`,kind:`alias`,doc:`Sandbox opt-ins for an external app's iframe, beyond the base every app
+gets (scripts on its own origin, forms, downloads). Top navigation is never
+available — it would let a tool redirect the whole viewer.
+- \`'popups'\`: window.open / target=_blank open a normal tab (the popup
+  escapes the sandbox — a sandboxed popup is useless for sign-in flows).
+- \`'modals'\`: alert / confirm / prompt / print.
+- \`'pointer-lock'\`: capture the mouse.
+- \`'storage-access'\`: the page may ask for its OWN unpartitioned cookies and
+  storage through the Storage Access API (a browser prompt) — for an SSO
+  session that does not reach a nested frame. Never anything of the
+  viewer's.`,def:`'popups' | 'modals' | 'pointer-lock' | 'storage-access'`},{name:`ExternalAppPermission`,kind:`alias`,doc:`Browser features an external app's iframe may be delegated through its
+\`allow\` attribute (Permissions Policy). None is delegated unless listed —
+the browser default for a cross-origin frame.`,def:`| 'camera' | 'microphone' | 'geolocation' | 'fullscreen' | 'clipboard-read' | 'clipboard-write' | 'autoplay' | 'display-capture' | 'publickey-credentials-get' | 'identity-credentials-get' | 'web-share' | 'picture-in-picture' | 'payment'`},{name:`HostExternalApp`,kind:`interface`,doc:"One SESSION-ONLY external app entry for\nTredespaceClient.externalAppsSet. Mirrors the Settings → External\nfields; only `name` and `url` are required.",fields:[{text:`id?: string;`,doc:`Optional STABLE id (1–64 of letters, digits, \`_ . : -\`, unique in the
+call): a later TredespaceClient.externalAppsSet with the same id
+is the same app — its button, tooltip and config update while any open
+panel or dialog of it keeps running. Omit it and the entry gets a fresh
+id every call.`},{text:`name: string;`,doc:`ribbon button + panel title`},{text:`url: string;`,doc:``},{text:`section?: string;`,doc:`ribbon section title — apps sharing a section are grouped together`},{text:`size?: 'big' | 'medium' | 'small';`,doc:`ribbon button size (default 'medium')`},{text:`tooltip?: string;`,doc:``},{text:`multiple?: boolean;`,doc:`allow several instances of this app open at once`},{text:`newWindow?: boolean;`,doc:`open in a new browser tab instead of an in-app panel (never auto-opened —
+window.open without a user gesture is popup-blocked). The tab keeps the
+viewer as \`window.opener\` and can drive it directly (see the file
+header, "A TAB THE VIEWER OPENED").`},{text:`modal?: boolean;`,doc:`open as a centered modal dialog over the app`},{text:`home?: boolean;`,doc:`Put the button on the HOME ribbon instead of External — for a tool the
+user should see immediately (a project selector, a report picker). It
+shows in one place, not both; \`section\` still titles its group.`},{text:`homeAt?: 'start' | 'end';`,doc:"Which end of the Home ribbon the group sits at: `'start'` (default) puts\nit before the viewer's own Home groups, `'end'` after them. Ignored\nunless `home` is set."},{text:`openOnStart?: boolean;`,doc:`open immediately when this set call lands (e.g. a project selector)`},{text:`config?: string | Record<string, unknown>;`,doc:"Config passed to the page as a stringified `?config=` URL param — pass an\nobject and the viewer stringifies it.\n\nFor a `modal` app it ALSO sets the dialog's initial size: `width` /\n`height` accept `\"600px\"`, `\"60%\"` (of the viewport) or a bare number\n(px). Both default to `\"70%\"`, which is a lot of screen for a small\nform — set them explicitly for compact dialogs. The dialog is capped at\n96vw × 96vh, and the user can still move it by its title bar and resize\nit from the bottom-right corner.\n\n```ts\n{ name: 'Picker', url: '…', modal: true,\n  config: { width: '480px', height: '320px', project: 'plant-7' } }\n```"},{text:`sandbox?: ExternalAppSandboxOption[];`,doc:`Sandbox opt-ins for the page's iframe — see
+ExternalAppSandboxOption. OPTIONAL: omit for the base policy every
+app has always had. Unknown values are rejected as \`bad-payload\`.`},{text:`allow?: ExternalAppPermission[];`,doc:"Browser features delegated to the page through the iframe `allow`\nattribute — see ExternalAppPermission. OPTIONAL: omit for none.\nThe permission prompt names the VIEWER's origin, not the page's, and a\nviewer that is itself embedded can only pass on what its own host granted\nit in ITS `allow`. Unknown values are rejected as `bad-payload`."}]},{name:`LoadProgressFn`,kind:`alias`,doc:"Progress tick for one model in an TredespaceClient.assetsLoad or\nTredespaceClient.assetsSetLoaded batch. Models load in parallel, so\nticks interleave — `index` is the model's position in the ids you passed\n(for `assetsSetLoaded`, in the subset it actually had to load).",def:`(p: LoadProgress) => void`},{name:`LoadProgress`,kind:`interface`,doc:``,fields:[{text:`completed: number;`,doc:``},{text:`total: number;`,doc:``},{text:`index: number;`,doc:``},{text:`id: string;`,doc:`the asset id this tick is about`},{text:`phase: 'done' | 'error';`,doc:"`error` = that model failed to load; the batch continues either way"}]},{name:`CameraInput`,kind:`interface`,doc:"A camera placement. The viewer's camera is ORBIT-based (Z-up): a pivot\n`target` plus `azimuth` / `elevation` (radians) and `distance` from the\npivot. Give an eye `position` instead and the viewer converts — pass\n`position` + `target` if you think in eye points. Anything omitted keeps\nits current value, so `{ target: [x, y, z] }` re-pivots without turning.",fields:[{text:`position?: [number, number, number];`,doc:"eye point; converted to azimuth/elevation/distance around `target`"},{text:`target?: [number, number, number];`,doc:`look-at pivot (defaults to the current pivot)`},{text:`azimuth?: number;`,doc:"radians — ignored when `position` is given"},{text:`elevation?: number;`,doc:"radians, +Z up — ignored when `position` is given"},{text:`distance?: number;`,doc:"distance from `target` — ignored when `position` is given"},{text:`orthographic?: boolean;`,doc:``},{text:`animate?: boolean;`,doc:"glide there (default) or snap with `false`"}]},{name:`CameraState`,kind:`interface`,doc:`The camera's current placement, from TredespaceClient.cameraGet.`,fields:[{text:`target: [number, number, number];`,doc:``},{text:`position: [number, number, number];`,doc:`eye point, derived from the orbit parameters`},{text:`azimuth: number;`,doc:``},{text:`elevation: number;`,doc:``},{text:`distance: number;`,doc:``},{text:`orthographic: boolean;`,doc:``}]},{name:`DialogInfo`,kind:`interface`,doc:`One external app the viewer hosts right now — a modal dialog or a dock
+panel — from TredespaceClient.uiDialogs.`,fields:[{text:`id: string;`,doc:"dialog id (`<appId>:<n>`) or dock panel id (`ext:<appId>[:<suffix>]`) —\nwhat the ui.dialog* methods address it by"},{text:`kind: 'dialog' | 'panel';`,doc:`a centered modal dialog, or an external-app dock panel (a tab)`},{text:`tdsDialogId: string;`,doc:"the `?tdsDialogId=` the page itself sees on its URL: stable per app for\na single-instance dialog (close → reopen gets the same one), fresh per\nopen for a `multiple` one — what the page keys its saved state by. The\nui.dialog* methods accept it in place of `id`, so a page can address\nitself by the value it already has."},{text:`appId: string;`,doc:`the external-app entry it was opened from`},{text:`name: string;`,doc:"the title shown — the app entry's name until `uiDialogRename` changes it"},{text:`url: string;`,doc:``},{text:`hidden: boolean;`,doc:`hidden but still mounted (its page keeps running and keeps its state);
+always false for a panel`},{text:`closing: boolean;`,doc:`a held close is under way: the page asked to be told first
+(\`onDialogClosing\`) and is flushing state, already hidden, until it is
+done or the timeout passes`}]},{name:`DialogChangedEvent`,kind:`interface`,doc:"One `dialog.changed` event, from TredespaceClient.onDialogChanged:\nthe dialog or panel as DialogInfo lists it plus what just happened\nto it. `hidden` / `shown` are the `uiDialogHide` / `uiDialogShow` round\ntrip (modal dialogs only; the page stays mounted); `closing` is a held\nclose under way — the page asked to be told first (`onDialogClosing`) and\nis flushing state while its dialog / tab is already hidden; `closed` is\nthe unmount, whichever way it happened (the ✕ on the title bar or tab,\n`uiClose`, `uiDialogClose`, a host replacing the app set, a layout swap\ndropping a panel); `renamed` follows `uiDialogRename`.",fields:[{text:`state: 'opened' | 'hidden' | 'shown' | 'renamed' | 'closing' | 'closed';`,doc:``}]},{name:`ExternalAppInfo`,kind:`interface`,doc:`One configured external app, from TredespaceClient.externalAppsList.`,fields:[{text:`id: string;`,doc:``},{text:`name: string;`,doc:``},{text:`url: string;`,doc:``},{text:`section: string;`,doc:``},{text:`size: 'big' | 'medium' | 'small';`,doc:``},{text:`multiple: boolean;`,doc:``},{text:`newWindow: boolean;`,doc:``},{text:`modal: boolean;`,doc:``},{text:`openOnStart: boolean;`,doc:``},{text:`home: boolean;`,doc:`button lives on the Home ribbon rather than External`},{text:`homeAt: 'start' | 'end';`,doc:`which end of the Home ribbon it sits at`},{text:`sandbox: ExternalAppSandboxOption[];`,doc:`sandbox opt-ins beyond the base policy (empty = base)`},{text:`allow: ExternalAppPermission[];`,doc:"browser features delegated through the iframe `allow` attribute (empty = none)"},{text:`hostManaged: boolean;`,doc:`true = session-only entry set through the API; false = user-configured in Settings`}]},{name:`ViewpointsConfig`,kind:`interface`,doc:`The whole viewpoint set as one JSON-safe blob — exactly what the panel's
+Save button writes to file. Treat it as opaque: persist it, hand it back
+to TredespaceClient.viewpointsSet, done.`,fields:[{text:`version: number;`,doc:``},{text:`viewpoints: unknown[];`,doc:``}]},{name:`ViewpointsBookmarkEvent`,kind:`interface`,doc:"Payload of the unsolicited `viewpoints.bookmark` event — fired when the\nuser clicks the host-configured bookmark button in the Viewpoints panel.\nCarries the CURRENT config so no follow-up `viewpointsGet` is needed.",fields:[{text:`label: string;`,doc:`the configured button label (identifies which button, if you rename it)`},{text:`config: ViewpointsConfig;`,doc:``}]},{name:`SqlCheckEntry`,kind:`interface`,doc:`One database referenced by a script, from TredespaceClient.sqlCheck.`,fields:[{text:`path: string;`,doc:"OPFS path (`sql_assets/<store>/<file>`) — the `mainDb` you passed or an\n`ATTACH DATABASE '…'` literal from the script."},{text:`exists: boolean;`,doc:``},{text:`size?: number;`,doc:"present only when `exists`"},{text:`modified?: number;`,doc:``},{text:`md5?: string;`,doc:"import-time md5 of the delivered bytes (see SqlDbInfo.md5);\nabsent when `exists` is false or the db predates md5 recording."}]},{name:`SqlCheckStatement`,kind:`interface`,doc:`One statement of the script passed to TredespaceClient.sqlCheck,
+as it would actually run.`,fields:[{text:`sql: string;`,doc:`the statement text with comments stripped and whitespace trimmed — a
+script that is nothing but comments yields no entries at all`},{text:`kind: string;`,doc:"leading keyword, lower-cased: `'select'`, `'with'`, `'attach'`,\n`'pragma'`, `'create'`, … (`''` when the statement starts with a\nnon-word character)"},{text:`returnsRows: boolean;`,doc:"expected to answer with a result set — the `select` / `with` / `values` /\n`pragma` / `explain` forms, plus anything carrying `RETURNING`"},{text:`attach?: string;`,doc:"the database path an `attach` statement references"}]},{name:`SqlStatementResult`,kind:`interface`,doc:``,fields:[{text:`columns: string[] | null;`,doc:`column names, or null for a statement that returned no result set.`},{text:`rows: unknown[];`,doc:"result rows as compact value arrays (parallel to `columns`)."},{text:`rowCount: number;`,doc:"total rows the statement produced, before any `maxRows` truncation."},{text:`truncated?: boolean;`,doc:"present + true when `rows` was cut to `maxRows`."}]},{name:`SqlStatementInput`,kind:`interface`,doc:"One statement of a `sqlExecute` batch — the contract the viewer's SQL\neditor (and the original sqllitedebug tool) run on.",fields:[{text:`name?: string;`,doc:`label echoed in the result and in statement-progress ticks`},{text:`sql: string;`,doc:``},{text:`binding?: (string | number | null)[][];`,doc:`One value array per execution. Several rows = the statement is prepared
+once and stepped per row (bulk INSERT without a giant SQL string);
+exactly one row = a plain bound statement. \`null\` binds NULL.`},{text:`collect?: boolean;`,doc:`keep this statement's rows (default false — a write returns nothing)`}]},{name:`SqlExecuteStatementResult`,kind:`interface`,doc:``,fields:[{text:`name?: string;`,doc:"the `name` you gave, when any"}]},{name:`SqlExecuteResult`,kind:`interface`,doc:``,fields:[{text:`statements: SqlExecuteStatementResult[];`,doc:"one entry per statement, in order; rows only for `collect: true`"},{text:`ms: number;`,doc:``}]},{name:`SqlExecuteProgress`,kind:`interface`,doc:"Progress tick for a `sqlExecute` batch. `statement` ticks fire as each\nstatement FINISHES (`no` = its index, `total` = statement count, `name` its\nlabel when given); `row` ticks fire every `progressSize` rows within the\ncurrent statement (`total` is null — sqlite can't know it up front).",fields:[{text:`type: 'statement' | 'row';`,doc:``},{text:`no: number;`,doc:``},{text:`total: number | null;`,doc:``},{text:`name?: string;`,doc:``}]},{name:`SqlFilterInput`,kind:`interface`,doc:"One FILTER_ARGS entry for a report-shaped SQL call: `value` is one row,\n`values` one row per entry — read them back with\n`select v from FILTER_ARGS where k = '…'`.",fields:[{text:`key: string;`,doc:``},{text:`value?: string | number;`,doc:``},{text:`values?: string[];`,doc:``}]},{name:`SqlRunInput`,kind:`interface`,doc:"Common payload of the report-shaped SQL commands. `mainDb` may be omitted\nwhen the SQL only ATTACHes files.",fields:[{text:`sql: string;`,doc:``},{text:`mainDb?: string;`,doc:``},{text:`attach?: string[];`,doc:`extra database paths to lock alongside (ATTACH literals are found anyway)`},{text:`filters?: SqlFilterInput[];`,doc:``}]},{name:`SqlReportType`,kind:`alias`,doc:`The outputs a report offers: a table, a coloring of the model, a
+click-following detail form.`,def:`'TABLE' | 'COLORING' | 'DETAIL'`},{name:`SqlEditorFilter`,kind:`interface`,doc:"One filter of the SQL Editor draft — the saved-report shape, richer than\nSqlFilterInput: INPUT holds its `value`; DROPDOWN holds the\n`dropdownSql` listing its options (`?` binds the search term, `searchValue`\nis the default bind, usually '%') and the `selected` ids. A `dropdownSql`\nnames its columns `id` and `label` — read by name, in any order; a query\nnaming neither is read positionally (first the id, second the text).",fields:[{text:`kind: 'INPUT' | 'DROPDOWN';`,doc:``},{text:`key: string;`,doc:"FILTER_ARGS.k — the SQL reads `select v from FILTER_ARGS where k='…'`."},{text:`label: string;`,doc:``},{text:`value?: string;`,doc:``},{text:`searchValue?: string;`,doc:``},{text:`dropdownSql?: string;`,doc:``},{text:`selected?: string[];`,doc:``},{text:`single?: boolean;`,doc:`DROPDOWN: one pick only instead of several; the value stays a list,
+holding at most one id. Default multi.`}]},{name:`SqlEditorDraft`,kind:`interface`,doc:`The SQL Editor's draft as TredespaceClient.sqlEditorGet returns it
+and TredespaceClient.sqlEditor takes it back. \`title\` is the
+report name.`,fields:[{text:`title: string;`,doc:``},{text:`description: string;`,doc:``},{text:`mainDb: string;`,doc:``},{text:`types: SqlReportType[];`,doc:``},{text:`sql: string;`,doc:``},{text:`filters: SqlEditorFilter[];`,doc:``},{text:`databases: string[];`,doc:`Every database a run locks: the main db + ATTACH'd paths.`}]},{name:`SetColorConfig`,kind:`interface`,doc:"A host's own Set Color configuration — the same `rules` shape\nTredespaceClient.colorRulesSet takes, plus the run mode. Pass one\nwith `custom-set` to paint a config you store yourself (the viewer's Set\nColor panel is neither read nor written).",fields:[{text:`rules: ColorRuleInput[];`,doc:``},{text:`mode?: 'reset' | 'append' | 'hide';`,doc:`'reset' (default) clears existing overrides first, 'append' layers,
+'hide' hides everything the rules do not match`}]},{name:`ColorMode`,kind:`alias`,doc:"How a colouring result is painted: a base coat over the whole model, then\nthe matched names on top. The `default-*` types are the viewer's own\nbuttons; the `custom-*` ones let you pick the highlight colour and bring\nyour own base or rule set. Every opacity here is 0-1.\n\nA colour is `'#rrggbb'` or a CSS colour name — TredespaceClient.colorsNames\nlists the ~147 the viewer knows, and the same tokens work in a query's\n`fullname_color` column.",def:`| { type: 'default-white' } | { type: 'default-hidden' } | { type: 'default-transparent'; opacity?: number } | { type: 'default-set' } | { type: 'custom-color'; color: string; opacity?: number; base?: 'white' | 'transparent' | 'hidden' | 'none'; baseOpacity?: number; } | { type: 'custom-set'; color?: string; opacity?: number; setConfig: SetColorConfig }`},{name:`SqlColorResult`,kind:`interface`,doc:``,fields:[{text:`mode: string;`,doc:"the `type` of the mode that ran"},{text:`rows: number;`,doc:`distinct fullnames the query returned — the rows themselves never left
+the viewer`},{text:`ms: number;`,doc:``}]},{name:`SqlSelectResult`,kind:`interface`,doc:``,fields:[{text:`rows: number;`,doc:`distinct fullnames the query returned`},{text:`matched: number;`,doc:`how many resolved to something in the loaded models`},{text:`missed: number;`,doc:`how many resolved to nothing`},{text:`ms: number;`,doc:``}]},{name:`NameListEntry`,kind:`interface`,doc:`One entry of a binary name list — what encodeNameList takes and
+decodeNameList gives back.`,fields:[{text:`fullname: string;`,doc:``},{text:`color?: string;`,doc:`'#ff0000', 'yellow', or 'default' to restore the mesh colour`},{text:`opacity?: number;`,doc:`0-100; omitted (or 100) = opaque`}]},{name:`NameListResult`,kind:`interface`,doc:``,fields:[{text:`names: number;`,doc:`names in the list you sent`}]},{name:`SelectionListResult`,kind:`interface`,doc:``,fields:[{text:`matched: number;`,doc:``},{text:`missed: number;`,doc:``}]},{name:`SqlQueryResult`,kind:`interface`,doc:``,fields:[{text:`statements: SqlStatementResult[];`,doc:`one entry per statement in the script, in order.`},{text:`ms: number;`,doc:`wall-clock milliseconds for the run.`}]},{name:`TreeSelectParent`,kind:`interface`,doc:"One ancestor of a clicked tree row. `folder` entries are import folders\n(with their cumulative path); `node` entries are model hierarchy levels.",fields:[{text:`name: string;`,doc:``},{text:`type: 'folder' | 'node';`,doc:``},{text:`path?: string;`,doc:`cumulative folder path — folder parents only`}]},{name:`TreeSelectEvent`,kind:`interface`,doc:"Unsolicited `tree.select` event: the user clicked a row in the tree view,\npicked an item in the viewport, or walked the selection with U / P.",fields:[{text:`fullname: string;`,doc:`fullname of the clicked node (folder path for folder rows)`},{text:`name: string;`,doc:``},{text:`folder: boolean;`,doc:`true for import folders and hierarchy nodes with children`},{text:`group?: string;`,doc:`the import folder the model lives in (item rows only)`},{text:`parents: TreeSelectParent[];`,doc:`every parent up to the root, outermost first`}]},{name:`TredespaceClientOptions`,kind:`interface`,doc:``,fields:[{text:`targetOrigin: string;`,doc:"The viewer's origin, e.g. 'https://viewer.example.com'. Required. A full\nURL is fine — only its origin is kept (`'https://portal.example.com/tredespace'`\nfor a path-proxied viewer becomes `'https://portal.example.com'`), since\nreplies arrive with the bare origin and are matched against it."},{text:`signal?: AbortSignal;`,doc:"Aborting this signal calls `dispose()` — one AbortController can own the\nclient AND every subscription made with `{ signal }`."},{text:`timeoutMs?: number;`,doc:`Per-command timeout (ms). Imports use importTimeoutMs. Default 30 000.`},{text:`importTimeoutMs?: number;`,doc:`Timeout for assets.import (conversions can be long). Default 600 000.`},{text:`waitForReady?: boolean;`,doc:"A command sent before `app.ready` waits for it (up to the command's own\ntimeout) instead of being answered `not-ready`. Default true; `false`\nposts at once, as earlier SDKs did."}]},{name:`ClientClosedEvent`,kind:`interface`,doc:"Payload of the local `client.closed` event — this client's link ended and\nit now behaves as disposed (pending requests settled with a `transport`\nerror, nothing fires after it).",fields:[{text:`reason: 'disposed' | 'relay' | 'target';`,doc:"`disposed`: `dispose()` was called or the constructor signal aborted.\n`relay`: the opener relaying for this client ended the relay, disposed\nits client or unloaded its page. `target`: the target window was found\nclosed — Window targets are watched; an iframe element is not (its host\nowns that DOM and disposes)."}]},{name:`RelayChangedEvent`,kind:`interface`,doc:"Payload of the local `relay.changed` event (opener side, one per window\npassed to `relay()`).",fields:[{text:`window: Window;`,doc:"the relayed window, as passed to `relay()`"},{text:`origin: string;`,doc:"the relayed window's origin (`relay()`'s `origin` reduced to a bare origin)"},{text:`state: 'connected' | 'disconnected' | 'closed';`,doc:"`connected`: the page in that window constructed its client — again\nafter every navigation, so an SSO round trip reconnects by itself.\n`disconnected`: that client disposed or its page is unloading\n(navigating or closing); the relay stays. `closed`: the window is gone\nand the relay was dropped."}]},{name:`RelayOptions`,kind:`interface`,doc:"Options for `relay()`.",fields:[{text:`origin: string;`,doc:"The relayed window's origin — mandatory and concrete, never `'*'`: it\nfilters what the relay accepts from the window and is the targetOrigin\nof everything posted back to it. A full URL is reduced to its origin,\nlike `targetOrigin`."},{text:`signal?: AbortSignal;`,doc:`Aborting the signal ends the relay, like the returned function.`}]},{name:`SubscribeOptions`,kind:`interface`,doc:"Options for `on()` and the typed `on*` helpers.",fields:[{text:`signal?: AbortSignal;`,doc:"Aborting the signal unsubscribes — the `addEventListener` idiom, so one\nAbortController can end many subscriptions (and the client) at once."}]},{name:`ClientKind`,kind:`alias`,doc:"Where a connected page sits relative to the viewer: the page hosting it\n(`parent`), the page that opened it (`opener`), an external-app panel or\nmodal inside it (`panel`), or a tab the viewer opened (`window`).",def:`'parent' | 'opener' | 'panel' | 'window'`},{name:`ClientInfo`,kind:`interface`,doc:"A page connected to the viewer's postMessage API, as the viewer sees it.\nThe viewer assigns `id` (per window lifetime — a reloaded page is a new\nclient) and stamps `origin`, so neither can be spoofed.",fields:[{text:`id: string;`,doc:``},{text:`origin: string;`,doc:``},{text:`kind: ClientKind;`,doc:``},{text:`dialog?: string;`,doc:"the `uiDialogs` id of the panel / modal hosting a `panel` client"},{text:`name?: string;`,doc:`chosen by that client in TredespaceClient.customSubscribe`},{text:`tag?: string;`,doc:`free-form label chosen by that client — a role, a version, anything
+other pages pick recipients by`},{text:`subscribed: boolean;`,doc:`on the bus (receives custom events and presence changes)`}]},{name:`CustomEventPayload`,kind:`interface`,doc:`A custom event as it arrives at a subscriber.`,fields:[{text:`event: string;`,doc:``},{text:`data: T;`,doc:"JSON — exactly what the sender's `data` gives after a JSON round trip"},{text:`from: ClientInfo;`,doc:``},{text:`to: string[] | null;`,doc:`the ids the sender addressed, or null for a broadcast`}]},{name:`CustomSubscribeOptions`,kind:`interface`,doc:``,fields:[{text:`name?: string;`,doc:`a display name other pages see in ClientInfo`},{text:`tag?: string;`,doc:`a free-form tag other pages see in ClientInfo and can pick
+recipients by — a role ('report-viewer'), a version, a project`},{text:`events?: string[];`,doc:"only these event names reach this client; omit for every event; an\nempty list = presence only (`onClientsChanged` without the traffic)"}]},{name:`CustomPostResult`,kind:`interface`,doc:``,fields:[{text:`delivered: number;`,doc:`subscribers the event was posted to`},{text:`missed: string[];`,doc:"ids from `to` that did not receive it: unknown, not subscribed,\nfiltered it out, or your own id (a sender never gets its own event)"}]},{name:`CustomClientsResult`,kind:`interface`,doc:``,fields:[{text:`self: string;`,doc:`this client's own id`},{text:`clients: ClientInfo[];`,doc:``}]},{name:`ClientsChangedEvent`,kind:`interface`,doc:``,fields:[{text:`clients: ClientInfo[];`,doc:``}]},{name:`DialogSubscribeOptions`,kind:`interface`,doc:"Options for `onDialogChanged`.",fields:[{text:`self?: boolean;`,doc:"Deliver only events about the dialog or panel hosting THIS page — the one whose\n`tdsDialogId` is on the page's own URL. For a page running inside a\nviewer dialog; elsewhere (no `?tdsDialogId=`) nothing is delivered."}]},{name:`DialogClosingOptions`,kind:`interface`,doc:"Options for `onDialogClosing`.",fields:[{text:`timeoutMs?: number;`,doc:`How long the viewer waits for your handlers before unmounting the page
+anyway, in ms — default 3000, max 10000.`}]},{name:`TredespaceEventMap`,kind:`interface`,doc:"Every event TredespaceClient.on can subscribe to, with its payload.\nThe viewer posts all but the last two; `client.closed` and `relay.changed`\nare raised by this client itself and never cross postMessage.",fields:[{text:`'app.ready': AppReady;`,doc:``},{text:`'app.bye': AppByeEvent;`,doc:``},{text:`'app.error': AppErrorEvent;`,doc:``},{text:`'theme.changed': { theme: 'dark' | 'light' };`,doc:``},{text:`'tree.select': TreeSelectEvent;`,doc:``},{text:`'instance.changed': { data: Record<string, unknown> };`,doc:``},{text:`'dialog.changed': DialogChangedEvent;`,doc:``},{text:`'viewpoints.bookmark': ViewpointsBookmarkEvent;`,doc:``},{text:`'assets.importUrl:progress': ImportUrlProgress;`,doc:``},{text:`'assets.load:progress': LoadProgress;`,doc:``},{text:`'sql.importUrl:progress': SqlImportProgress;`,doc:``},{text:`'sql.execute:progress': SqlExecuteProgress;`,doc:``},{text:`'sql.color:progress': { rows: number };`,doc:``},{text:`'sql.select:progress': { rows: number };`,doc:``},{text:`'sql.table:progress': { rows: number };`,doc:``},{text:`'custom.event': CustomEventPayload;`,doc:``},{text:`'custom.clients.changed': ClientsChangedEvent;`,doc:``},{text:`'client.closed': ClientClosedEvent;`,doc:``},{text:`'relay.changed': RelayChangedEvent;`,doc:``}]}],methodCount:117,problems:[]},n=e=>document.getElementById(e),r=new Set,i=new Map(t.types.map(e=>[e.name,e]));for(let e of t.types)r.add(e.name);function a(e){if(e.kind===`alias`||!e.fields)return`type ${e.name} = ${e.def??`unknown`};`;let t=[`interface ${e.name} {`];for(let n of e.fields)n.doc&&t.push(`  /** ${n.doc.replace(/\s+/g,` `).trim()} */`),t.push(`  ${n.text.replace(/;\s*$/,``)};`);return t.push(`}`),t.join(`
+`)}var o=e=>e.replace(/[&<>]/g,e=>e===`&`?`&amp;`:e===`<`?`&lt;`:`&gt;`);function s(e){return o(e).replace(/\{@link\s+([^}]+)\}/g,(e,t)=>`<code>${o(String(t).trim())}</code>`).replace(/`([^`]+)`/g,(e,t)=>`<code>${o(String(t))}</code>`).replace(/\n/g,` `)}var c=new Set(`string.number.boolean.void.null.undefined.unknown.any.never.readonly.true.false.object.symbol.bigint.interface.type.extends.const.await.new.return.import.from.if.else`.split(`.`)),l=/(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)|(\s+)|([^\s])/g;function u(e,t=!1){let n=``,i=!1;return e.replace(l,(e,a,s,l,u,d,f)=>(a?n+=`<span class="hl-cm">${o(a)}</span>`:s?n+=`<span class="hl-st">${o(s)}</span>`:l?n+=`<span class="hl-nu">${o(l)}</span>`:u?(t&&!i?n+=`<span class="hl-fn">${o(u)}</span>`:c.has(u)?n+=`<span class="hl-kw">${o(u)}</span>`:/^[A-Z]/.test(u)&&r.has(u)?n+=`<button type="button" class="hl-ty type-link" data-type="${o(u)}">${o(u)}</button>`:/^[A-Z]/.test(u)?n+=`<span class="hl-ty">${o(u)}</span>`:n+=o(u),i=!0):n+=d||o(f),``)),n}var d=n(`genMeta`);d&&(d.textContent=`generated from ${t.generatedFrom} · ${t.methodCount} commands · protocol v${t.protocol}`);var f=n(`refNav`);if(f)for(let e of t.groups){let t=document.createElement(`a`);t.className=`ref-pill`,t.href=`#ns-${e.ns}`,t.textContent=e.ns,f.appendChild(t)}var p=n(`apiRef`);if(p){p.innerHTML=``;for(let e of t.groups){let t=document.createElement(`div`);t.className=`ref-group`,t.id=`ns-${e.ns}`;let n=document.createElement(`h3`);n.innerHTML=`${o(e.ns)} <span class="ref-count">${e.methods.length}</span>`,t.appendChild(n);for(let n of e.methods){let e=document.createElement(`article`);e.className=`ref-item`,e.dataset.search=`${n.command??``} ${n.name} ${n.signature} ${n.doc} ${n.sample??n.example??``}`.toLowerCase();let r=n.command?`<span class="ref-cmd">${o(n.command)}</span>`:`<span class="ref-cmd ref-cmd-none">client</span>`,i=n.sample??n.example;e.innerHTML=`<div class="ref-head">${r}<code class="ref-method">${o(n.name)}</code></div><pre class="ref-sig">${u(n.signature,!0)}</pre>`+(n.doc?`<p class="ref-doc">${s(n.doc)}</p>`:``)+(i?`<div class="ref-example"><span class="ref-example-label">example</span><pre>${u(i,!1)}</pre></div>`:``),t.appendChild(e)}p.appendChild(t)}}var m=n(`apiTypes`);if(m)for(let e of t.types){let t=document.createElement(`article`);t.className=`type-card`,t.id=`type-${e.name}`;let n=e.fields?e.fields.map(e=>e.text).join(` `):e.def??``;t.dataset.search=`${e.name} ${e.doc} ${n}`.toLowerCase(),t.innerHTML=(e.doc?`<p class="type-doc">${s(e.doc)}</p>`:``)+`<pre class="type-sig">${u(a(e))}</pre>`,m.appendChild(t)}var h=n(`refSearch`);h?.addEventListener(`input`,()=>{let e=h.value.trim().toLowerCase();for(let t of document.querySelectorAll(`.ref-item`))t.style.display=!e||(t.dataset.search??``).includes(e)?``:`none`;for(let e of document.querySelectorAll(`.ref-group`)){let t=[...e.querySelectorAll(`.ref-item`)].some(e=>e.style.display!==`none`);e.style.display=t?``:`none`}for(let t of document.querySelectorAll(`.type-card`))t.style.display=!e||(t.dataset.search??``).includes(e)?``:`none`});var g=URL.createObjectURL(new Blob([e],{type:`text/plain;charset=utf-8`}));n(`downloadSdk`)?.addEventListener(`click`,()=>{let e=document.createElement(`a`);e.href=g,e.download=`tredespace-client.ts`,document.body.appendChild(e),e.click(),e.remove()}),n(`rawSdkLink`);var _=document.createElement(`div`);_.className=`type-pop`,_.hidden=!0,document.body.appendChild(_),document.addEventListener(`click`,e=>{let t=e.target,n=t.closest(`.type-link`);if(n?.dataset.type){let t=i.get(n.dataset.type);if(!t)return;_.innerHTML=`<div class="type-pop-title">${o(t.name)}</div>`+(t.doc?`<p class="type-pop-doc">${s(t.doc)}</p>`:``)+`<pre>${u(a(t))}</pre>`,_.hidden=!1;let r=n.getBoundingClientRect(),c=Math.min(400,window.innerWidth-16);_.style.width=`${c}px`,_.style.left=`${Math.max(8,Math.min(window.scrollX+r.left,window.scrollX+window.innerWidth-c-8))}px`,_.style.top=`${window.scrollY+r.bottom+6}px`,e.stopPropagation()}else t.closest(`.type-pop`)||(_.hidden=!0)}),document.addEventListener(`keydown`,e=>{e.key===`Escape`&&(_.hidden=!0)});
